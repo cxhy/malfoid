@@ -7,7 +7,7 @@ chunk with a glossary-first workflow, polishes the result, and runs an independe
 fidelity proofread before assembling reader-facing HTML and Markdown. Every step is a
 plain script; every intermediate artifact is a file you can inspect, diff and resume.
 
-[简体中文](#简体中文) · [Pipeline](docs/pipeline.md) · [Tool reference](docs/tools.md) · [Contributing](CONTRIBUTING.md)
+[简体中文](#简体中文) · [Pipeline](docs/pipeline.md) · [Tool reference](docs/tools.md) · [Wenyi comparison](docs/wenyi-comparison.md) · [Contributing](CONTRIBUTING.md)
 
 ---
 
@@ -33,6 +33,14 @@ pre-commit hooks, CI, and a documented artifact contract.
   PDFs → chapter-aligned Markdown plus `meta.json`.
 - **Glossary-first translation** — term table seeded with official names, frequency
   counting, per-chunk prompt context (glossary + neighbour excerpts).
+- **HP fanfic profile** — setting-specific rules for female Draco, official HP names,
+  canon divergence, timeline/age, reveal timing, British school address and spells, kept
+  in `profiles/hp-fanfic/` and shared by every stage.
+- **Resumable whole-book prescan** — chapter digests, style brief, synopsis and an HP
+  story bible, content-addressed and cached so reruns only rebuild changed chapters.
+- **Whole-book continuity review** — a separate cross-chapter pass for term/pronoun
+  drift, timeline and character-status contradictions, reveal-timing errors and
+  canon-divergence drift, with bounded evidence and a conflict list.
 - **Resumable chunks** — `work_temp/` is the source of truth; reruns skip finished
   chunks and can retry structure failures.
 - **Polish pass** — light-touch Chinese prose polish with structural/length/term checks.
@@ -74,13 +82,15 @@ Convert a source and start a work:
   works/my-work/source/work.md --olang zh --chunk-size 12000 --temp-root works/my-work
 ```
 
-Translate, polish, proofread and build:
+Prescan, translate, polish, proofread and review:
 
 ```bash
+.venv/bin/python tools/build_prescan.py works/my-work --effort low
 .venv/bin/python tools/make_prompt_ctx.py works/my-work/work_temp
 .venv/bin/python tools/translate_all.py works/my-work/work_temp --workers 1 --effort low
 .venv/bin/python tools/polish_all.py works/my-work --effort minimal
 .venv/bin/python tools/proofread_all.py works/my-work --effort low --workers 1
+.venv/bin/python tools/review_book.py works/my-work --effort low
 .venv/bin/python tools/merge_polished.py works/my-work
 .venv/bin/python tools/build_html.py works/my-work
 .venv/bin/python tools/finalize.py works/my-work
@@ -95,6 +105,7 @@ The full command reference, artifact contract and troubleshooting notes live in
 
 ```text
 tools/                 converters, pipeline drivers, QA and delivery scripts
+profiles/              translation profiles (HP fanfic rules, prescan and review prompts)
 tests/                 offline unit tests (no network, no model calls)
 docs/                  pipeline contract and tool reference
 .pi/skills/            vendored agent skills used by the pipeline (MIT, see notices)
