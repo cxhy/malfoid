@@ -591,15 +591,16 @@ def _proposal_text(candidate: dict[str, Any]) -> str:
 
 
 def group_conflicts(
-    candidates: list[dict[str, Any]], *, verified_only: bool = True
+    candidates: list[dict[str, Any]], *, verified_only: bool = False
 ) -> list[dict[str, Any]]:
     """Group contradictory proposals from different blocks into conflicts.
 
-    Raw candidates and verification records are both accepted. With
-    ``verified_only`` a verification record that is not confirmed is skipped.
-    A conflict needs at least two candidates, two distinct blocks and two distinct
-    proposal texts. Grouping uses ``conflict_key``, then ``subject``, then the
-    concrete chapter/segment position.
+    Raw candidates and verification records are both accepted. By default every
+    verification record participates, so contradictory proposals still surface
+    when evidence is rejected or unresolved. Set ``verified_only=True`` to skip
+    records that are not confirmed. A conflict needs at least two candidates, two
+    distinct blocks and two distinct proposal texts. Grouping uses
+    ``conflict_key``, then ``subject``, then the concrete chapter/segment position.
     """
     groups: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for item in candidates:
@@ -788,10 +789,12 @@ def review_with_arbitration(
     max_rounds: int = DEFAULT_EVIDENCE_ROUNDS,
     max_refs: int = DEFAULT_MAX_EVIDENCE_REFS,
     max_chars: int = DEFAULT_MAX_EVIDENCE_CHARS,
-    verified_only: bool = True,
+    verified_only: bool = False,
 ) -> dict[str, Any]:
     """Verify review candidates, group conflicts and arbitrate them.
 
+    By default conflicts include rejected and unresolved candidates, so a
+    contradiction is not silently dropped just because evidence did not confirm it.
     The result keeps candidates in review order, arbitration results in conflict
     order, and exposes unresolved conflicts separately for human review.
     """

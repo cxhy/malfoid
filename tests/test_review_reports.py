@@ -378,3 +378,23 @@ def test_legacy_proofread_reports_survive_review_report_writes(tmp_path: Path) -
     assert legacy.read_bytes() == before
     assert review_reports.read_report(legacy)["verdict"] == "PASS"
     assert review_reports.review_dir(book) == book / "translation" / "review"
+
+
+def test_block_verdict_does_not_match_a_rejected_record_for_another_segment() -> None:
+    review = _review(issues=[_issue(1, "称呼漂移。")])
+    evidence = [_verified(index=2, status="rejected", message="称呼漂移。")]
+    assert review_reports.block_verdict(review, evidence=evidence) == "FAIL"
+
+
+def test_block_verdict_matches_the_issue_message_not_just_the_segment() -> None:
+    review = _review(issues=[_issue(1, "称呼漂移。")])
+    evidence = [_verified(index=1, status="rejected", message="另一个问题。")]
+    assert review_reports.block_verdict(review, evidence=evidence) == "FAIL"
+
+
+def test_block_verdict_matches_the_issue_chapter_when_present() -> None:
+    issue = {**_issue(1, "称呼漂移。"), "chapter": 2}
+    review = _review(issues=[issue])
+    evidence = [_verified(index=1, status="rejected", message="称呼漂移。")]
+    evidence[0]["candidate"]["chapter"] = 1
+    assert review_reports.block_verdict(review, evidence=evidence) == "FAIL"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,62 @@ def _chunk_values(values: list[str] | None) -> list[str] | None:
     return chunks
 
 
+def load_glossary_terms(work_dir: Path) -> list[dict[str, Any]]:
+    """Load glossary terms for preview prompt injection."""
+    path = Path(work_dir) / "work_temp" / "glossary.json"
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    terms = data.get("terms") if isinstance(data, dict) else None
+    return [term for term in terms or [] if isinstance(term, dict)]
+
+
+def _normalize_chunk_id(value: str) -> str:
+    match = re.search(r"(\d+)$", str(value))
+    return f"chunk{int(match.group(1)):04d}" if match else str(value)
+
+
+def _excerpt_head(text: str, limit: int = 600) -> str:
+    clean = text.strip()
+    return clean[:limit].strip()
+
+
+def _excerpt_tail(text: str, limit: int = 600) -> str:
+    clean = text.strip()
+    return clean[-limit:].strip()
+
+
+def build_neighbour_context(work_dir: Path, chunk_ids: list[str] | None = None) -> str:
+    """Build read-only excerpts from chunks immediately around the selection."""
+    work = Path(work_dir)
+    ids = [
+        _normalize_chunk_id(value)
+        for value in (chunk_ids or preview_migration.discover_chunk_ids(work))
+    ]
+    if not ids:
+        return ""
+    paths = sorted((work / "work_temp").glob("chunk*.md"))
+    selected = [position for position, path in enumerate(paths) if path.stem in set(ids)]
+    if not selected:
+        return ""
+    snippets: list[str] = []
+    first, last = min(selected), max(selected)
+    if first > 0:
+        before = paths[first - 1]
+        snippets.append(
+            f"Previous chunk {before.stem} excerpt:\n{_excerpt_tail(before.read_text(encoding='utf-8'))}"
+        )
+    if last + 1 < len(paths):
+        after = paths[last + 1]
+        snippets.append(
+            f"Next chunk {after.stem} excerpt:\n{_excerpt_head(after.read_text(encoding='utf-8'))}"
+        )
+    return "\n\n".join(snippets)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("work_dir", type=Path)
@@ -97,6 +154,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     client = LocalModelClient(args.model, args.effort, args.max_tokens)
+    glossary_terms = load_glossary_terms(args.work_dir)
+    context = build_neighbour_context(args.work_dir, chunks)
     result = preview_migration.run_preview(
         args.work_dir,
         chunks,
@@ -106,6 +165,8 @@ def main(argv: list[str] | None = None) -> None:
         polish=not args.no_polish,
         output_dir=args.output_dir,
         budget=args.budget,
+        glossary_terms=glossary_terms,
+        context=context,
     )
     summary: dict[str, Any] = {
         "migration": result.migration.as_dict(),

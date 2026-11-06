@@ -70,6 +70,8 @@ def _protocol_contract(count: int) -> list[str]:
     return [
         "Return a JSON object with exactly three keys: issues, reviewed_segments and complete.",
         "issues: an array of objects; each has an integer segment_index and a non-empty message.",
+        "Each issue may also include optional subject and proposal strings: subject groups "
+        "related issues across blocks, and proposal states the recommended fix.",
         f"reviewed_segments: the integer {count}, matching the number of segments below.",
         "complete: true.",
         "Do not translate, rewrite, edit or add commentary.",
@@ -150,6 +152,12 @@ def validate_review_output(
         message = issue.get("message")
         if not isinstance(message, str) or not message.strip():
             raise ReviewProtocolError(f"issue {position} is missing a non-empty message")
+        for field in ("subject", "proposal"):
+            if field not in issue:
+                continue
+            value = issue.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ReviewProtocolError(f"issue {position} has an invalid {field}")
         cleaned.append(issue)
     return {"issues": cleaned, "reviewed_segments": reviewed, "complete": True}
 

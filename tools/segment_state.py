@@ -272,11 +272,23 @@ def load_chapter(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def logical_blocks(chapter: dict) -> list[dict]:
-    """Collapse continuation parts into logical blocks (heading or text)."""
+def _segment_text(segment: dict, translated: bool) -> str:
+    if translated:
+        target = segment.get("target")
+        if isinstance(target, str) and target.strip():
+            return target
+    return segment.get("source") or ""
+
+
+def logical_blocks(chapter: dict, translated: bool = False) -> list[dict]:
+    """Collapse continuation parts into logical blocks (heading or text).
+
+    Source mode is the default. ``translated=True`` renders targets instead and
+    falls back to source text for a segment that has no target yet.
+    """
     blocks: list[dict] = []
     for segment in chapter.get("segments") or []:
-        text = segment.get("source") or ""
+        text = _segment_text(segment, translated)
         if segment.get("cont") and blocks and blocks[-1]["kind"] == "text":
             blocks[-1]["text"] += text
         else:
@@ -290,10 +302,10 @@ def logical_blocks(chapter: dict) -> list[dict]:
     return blocks
 
 
-def render_markdown(chapter: dict) -> str:
-    """Render source blocks, merging continuation parts into one paragraph."""
+def render_markdown(chapter: dict, translated: bool = False) -> str:
+    """Render logical blocks, merging continuation parts into one paragraph."""
     parts: list[str] = []
-    for block in logical_blocks(chapter):
+    for block in logical_blocks(chapter, translated=translated):
         if block["kind"] == "heading":
             level = int(block.get("level") or chapter.get("heading_level") or 1)
             parts.append(f"{'#' * level} {block['text']}")
@@ -328,11 +340,12 @@ def _chapter_sort_key(path: Path) -> int:
     return int(m.group(1)) if m else 0
 
 
-def render_book(book_dir: Path) -> str:
+def render_book(book_dir: Path, translated: bool = False) -> str:
+    """Render a whole book in source mode, or targets with ``translated=True``."""
     chapters_dir = book_dir / "source" / CHAPTERS_DIR
     paths = sorted(chapters_dir.glob("ch-*.json"), key=_chapter_sort_key)
     chapters = [load_chapter(path) for path in paths]
-    return "\n\n".join(render_markdown(chapter) for chapter in chapters)
+    return "\n\n".join(render_markdown(chapter, translated=translated) for chapter in chapters)
 
 
 def _chapter_record(chapter: dict) -> dict:
@@ -479,7 +492,10 @@ def ingest_sources(
     stale = [path for path in chapters_dir.glob("ch-*.json") if path not in paths_out]
     if stale:
         archive = (
-            chapters_dir / "archive" / datetime.now(timezone.utc).isoformat(timespec="seconds")
+            book_dir
+            / "archive"
+            / datetime.now(timezone.utc).isoformat(timespec="seconds")
+            / "chapters"
         )
         archive.mkdir(parents=True, exist_ok=True)
         for path in stale:

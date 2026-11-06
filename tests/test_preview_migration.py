@@ -253,19 +253,22 @@ def test_render_markdown_and_html_without_paragraph_loss(tmp_path: Path) -> None
     }
     preview_migration.save_chapter(book / "source" / "chapters" / "ch-01.json", chapter)
 
-    markdown = preview_migration.render_book_markdown(book)
-    html = preview_migration.render_book_html(book)
+    render = preview_migration.write_preview(book, output_dir=book / "translation" / "preview")
+    markdown = render.markdown.read_text(encoding="utf-8")
+    html = render.html.read_text(encoding="utf-8")
 
     assert markdown.startswith("# 第一章")
     assert "第一段。" in markdown
     assert "第二段。" in markdown
     assert "长段前半。长段后半。" in markdown
     assert len([block for block in markdown.split("\n\n") if block.strip()]) == 4
-    assert html.count("<p>") == 3
     assert "第一段。" in html
     assert "第二段。" in html
     assert "长段前半。长段后半。" in html
-    assert "<h1>第一章</h1>" in html
+    assert "<h1" in html and "第一章" in html
+    assert "FangSong" in html
+    assert "toc-toggle" in html
+    assert "目录" in html
 
 
 def test_run_preview_end_to_end_produces_markdown_and_html(tmp_path: Path) -> None:
@@ -306,8 +309,9 @@ def test_run_preview_end_to_end_produces_markdown_and_html(tmp_path: Path) -> No
     assert "第一段。" in markdown
     assert "第二段。" in markdown
     assert "润色-3" in markdown
-    assert html.count("<p>") == 3
     assert "润色-3" in html
+    assert "FangSong" in html
+    assert "toc-toggle" in html
 
 
 def test_run_preview_refuses_to_render_untranslated_segments(tmp_path: Path) -> None:
@@ -322,3 +326,56 @@ def test_run_preview_refuses_to_render_untranslated_segments(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="untranslated"):
         preview_migration.run_preview(work, [1], book_dir=book, source_paths=[changed], client=None)
+
+
+def test_migrate_archives_stale_chapters_under_book_archive(tmp_path: Path) -> None:
+    work = _legacy_work(
+        tmp_path,
+        ["First paragraph."],
+        ["第一段。"],
+    )
+    book = tmp_path / "book"
+    stale = book / "source" / "chapters" / "ch-99.json"
+    _write(stale, json.dumps({"chapter": 99, "segments": []}))
+
+    preview_migration.migrate_preview(work, [1], book_dir=book)
+
+    assert not stale.exists()
+    archived = list((book / "archive").rglob("ch-99.json"))
+    assert len(archived) == 1
+    assert archived[0].parent.name == "chapters"
+    assert "source/chapters/archive" not in str(archived[0])
+
+
+def test_run_preview_injects_glossary_and_neighbour_context(tmp_path: Path) -> None:
+    work = _legacy_work(
+        tmp_path,
+        ["Draco waited."],
+        ["德拉科等待着。"],
+    )
+    changed = tmp_path / "changed-source.md"
+    _write(
+        changed,
+        HEADING_EN + "\n\nDraco waited.\n\nDraco left the alley.",
+    )
+    book = tmp_path / "book"
+    client = FakeClient()
+
+    preview_migration.run_preview(
+        work,
+        [1],
+        book_dir=book,
+        source_paths=[changed],
+        client=client,
+        output_dir=book / "translation" / "preview",
+        glossary_terms=[
+            {"source": "Draco", "target": "德拉科"},
+            {"source": "Harry", "target": "哈利"},
+        ],
+        context="Previous chunk excerpt: Draco met Harry.",
+    )
+
+    prompt = client.prompts[0]
+    assert "Draco => 德拉科" in prompt
+    assert "Harry => 哈利" not in prompt
+    assert "Previous chunk excerpt: Draco met Harry." in prompt

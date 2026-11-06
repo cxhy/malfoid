@@ -105,6 +105,29 @@ def _arbitration_key(record: dict[str, Any]) -> str:
     return str(record.get("conflict") or "")
 
 
+def _same_issue(issue: dict[str, Any], record: dict[str, Any]) -> bool:
+    """Match an issue to its evidence record by segment, message and chapter."""
+    candidate = record.get("candidate") or {}
+    try:
+        issue_index = int(issue.get("segment_index"))
+        record_index = int(candidate.get("segment_index"))
+    except (TypeError, ValueError):
+        return False
+    if issue_index != record_index:
+        return False
+    if str(issue.get("message") or "") != str(candidate.get("message") or ""):
+        return False
+    issue_chapter = issue.get("chapter")
+    record_chapter = candidate.get("chapter")
+    if issue_chapter is not None and record_chapter is not None:
+        try:
+            if int(issue_chapter) != int(record_chapter):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def block_verdict(
     review: dict[str, Any],
     evidence: Any = None,
@@ -128,10 +151,11 @@ def block_verdict(
 
     if records is None:
         return FAIL if issues else PASS
-    if len(records) < len(issues):
-        return FAIL
-    for record in records:
-        if record.get("status") != "rejected":
+    for issue in issues:
+        matches = [record for record in records if _same_issue(issue, record)]
+        if not matches:
+            return FAIL
+        if any(record.get("status") != "rejected" for record in matches):
             return FAIL
     return PASS
 

@@ -299,11 +299,61 @@ def test_run_preview_review_keeps_chapter_positions_apart(tmp_path: Path) -> Non
     result = review_preview.run_preview_review(book, client)
 
     candidates = result["evidence"]["candidates"]
-    assert sorted(candidate["candidate"]["chapter"] for candidate in candidates) == [1, 2]
-    assert [candidate["candidate"]["segment_index"] for candidate in candidates] == [1, 1]
-    assert len(result["reviews"]) == 2
-    assert result["metrics"]["confirmed"] == 2
+    assert [candidate["candidate"]["chapter"] for candidate in candidates] == [2]
+    assert [candidate["candidate"]["segment_index"] for candidate in candidates] == [1]
+    assert [candidate["candidate"]["global_segment_index"] for candidate in candidates] == [3]
+    assert len(result["reviews"]) == 1
+    issue = result["reviews"][0]["issues"][0]
+    assert (issue["chapter"], issue["segment_index"], issue["global_segment_index"]) == (2, 1, 3)
+    assert result["metrics"]["confirmed"] == 1
     assert result["decision"]["decision"] == "GO"
+
+
+def test_run_preview_review_plans_cross_chapter_blocks_and_maps_global_indices(
+    tmp_path: Path,
+) -> None:
+    chapters = [
+        _chapter(
+            1,
+            [
+                _segment(0, "Chapter One", "第一章", kind="heading"),
+                _segment(1, "Draco waited.", "德拉科等待着。"),
+            ],
+        ),
+        _chapter(
+            2,
+            [
+                _segment(0, "Chapter Two", "第二章", kind="heading"),
+                _segment(1, "Harry looked up.", "哈利抬起头。"),
+            ],
+        ),
+    ]
+    book = _write_book(tmp_path, chapters)
+
+    def review_issues(indices: list[int]) -> list[dict]:
+        issues = [{"segment_index": indices[0], "message": "称呼漂移：跨章。"}]
+        if len(indices) > 1:
+            issues.append({"segment_index": indices[-1], "message": "称呼漂移：跨章。"})
+        return issues
+
+    client = PreviewClient(
+        review_issues=review_issues,
+        verdicts={"称呼漂移：跨章。": "confirmed"},
+    )
+
+    result = review_preview.run_preview_review(book, client, budget=6, measure=lambda text: 1)
+
+    assert [[segment["index"] for segment in block] for block in result["blocks"]] == [
+        [0, 1, 2],
+        [3],
+    ]
+    assert [segment["chapter"] for segment in result["blocks"][0]] == [1, 1, 2]
+    candidates = result["evidence"]["candidates"]
+    assert [
+        (candidate["candidate"]["chapter"], candidate["candidate"]["segment_index"])
+        for candidate in candidates
+    ] == [(1, 0), (2, 0), (2, 1)]
+    assert [candidate["candidate"]["global_segment_index"] for candidate in candidates] == [0, 2, 3]
 
 
 def test_run_preview_review_records_high_false_positive_rate_as_no_go(tmp_path: Path) -> None:

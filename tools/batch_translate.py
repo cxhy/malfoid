@@ -68,10 +68,69 @@ def _protocol_preamble(count: int) -> list[str]:
     ]
 
 
-def build_batch_prompt(segments: list[dict[str, Any]]) -> str:
-    """Build a numbered batch request for exactly one target per segment."""
+def _term_parts(term: Any) -> tuple[str, str, list[str]]:
+    if isinstance(term, dict):
+        source = str(term.get("source") or "").strip()
+        target = str(term.get("target") or "").strip()
+        aliases = [str(alias).strip() for alias in term.get("aliases") or [] if str(alias).strip()]
+        return source, target, aliases
+    text = str(term).strip()
+    return text, "", []
+
+
+def relevant_glossary_terms(
+    segments: list[dict[str, Any]], glossary_terms: list[Any] | None
+) -> list[Any]:
+    """Select glossary entries whose source or alias occurs in the batch text."""
+    if not glossary_terms:
+        return []
+    haystack = " ".join(segment.get("source") or "" for segment in segments).casefold()
+    selected: list[Any] = []
+    for term in glossary_terms:
+        source, target, aliases = _term_parts(term)
+        if not source and not target:
+            continue
+        needles = [source, *aliases]
+        if not any(needle and needle.casefold() in haystack for needle in needles):
+            continue
+        selected.append(term)
+    return selected
+
+
+def _context_lines(
+    segments: list[dict[str, Any]],
+    glossary_terms: list[Any] | None,
+    context: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    terms = relevant_glossary_terms(segments, glossary_terms)
+    if terms:
+        lines.append("Glossary (use the listed target terms exactly):")
+        for term in terms:
+            source, target, aliases = _term_parts(term)
+            line = f"- {source}"
+            if target:
+                line += f" => {target}"
+            if aliases:
+                line += f" (aliases: {', '.join(aliases)})"
+            lines.append(line)
+        lines.append("")
+    if isinstance(context, str) and context.strip():
+        lines.append("Neighbour context (read-only):")
+        lines.append(context.strip())
+        lines.append("")
+    return lines
+
+
+def build_batch_prompt(
+    segments: list[dict[str, Any]],
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
+) -> str:
+    """Build a numbered batch request with optional glossary and neighbour context."""
     lines = [
         "Translate each numbered source segment into Simplified Chinese.",
+        *_context_lines(segments, glossary_terms, context),
         *_protocol_preamble(len(segments)),
     ]
     for segment in segments:
@@ -79,10 +138,15 @@ def build_batch_prompt(segments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def build_single_prompt(segment: dict[str, Any]) -> str:
+def build_single_prompt(
+    segment: dict[str, Any],
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
+) -> str:
     """Build a one-segment request for the fallback path."""
     lines = [
         "Translate the source segment into Simplified Chinese.",
+        *_context_lines([segment], glossary_terms, context),
         *_protocol_preamble(1),
     ]
     lines.append(f"[{segment.get('index')}] {segment.get('source') or ''}")
@@ -152,11 +216,22 @@ def _error_text(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-def _fallback(client: Any, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fallback(
+    client: Any,
+    segments: list[dict[str, Any]],
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
+) -> list[dict[str, Any]]:
     results = []
     for segment in segments:
         try:
-            targets = extract_targets(call_client(client, build_single_prompt(segment)), 1)
+            targets = extract_targets(
+                call_client(
+                    client,
+                    build_single_prompt(segment, glossary_terms=glossary_terms, context=context),
+                ),
+                1,
+            )
         except Exception as exc:
             results.append(
                 _result(
@@ -187,12 +262,16 @@ def translate_batch(
     budget: int = DEFAULT_BATCH_BUDGET,
     measure=None,
     max_retries: int = MAX_PROTOCOL_RETRIES,
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
 ) -> list[dict[str, Any]]:
     """Translate segments with an equal-length completeness contract.
 
     Protocol failures are retried up to ``max_retries`` additional times. If the
     batch cannot be planned or all attempts fail, every segment gets one fallback
-    call. The returned list follows input order and contains one result per segment.
+    call. Optional glossary terms and neighbour context are injected into every
+    prompt; only glossary entries relevant to that batch are listed. The returned
+    list follows input order and contains one result per segment.
     """
     segments = list(segments)
     if not segments:
@@ -200,7 +279,7 @@ def translate_batch(
     try:
         batches = plan_batch(segments, budget, measure)
     except ValueError:
-        return _fallback(client, segments)
+        return _fallback(client, segments, glossary_terms, context)
 
     results: list[dict[str, Any]] = []
     for batch in batches:
@@ -209,7 +288,11 @@ def translate_batch(
             attempts += 1
             try:
                 targets = extract_targets(
-                    call_client(client, build_batch_prompt(batch)), len(batch)
+                    call_client(
+                        client,
+                        build_batch_prompt(batch, glossary_terms=glossary_terms, context=context),
+                    ),
+                    len(batch),
                 )
             except ProtocolError:
                 continue
@@ -219,7 +302,7 @@ def translate_batch(
                 )
             break
         else:
-            results.extend(_fallback(client, batch))
+            results.extend(_fallback(client, batch, glossary_terms, context))
 
     return results
 

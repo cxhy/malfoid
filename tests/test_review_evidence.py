@@ -464,7 +464,7 @@ def test_group_conflicts_requires_distinct_blocks() -> None:
     assert review_evidence.group_conflicts(candidates) == []
 
 
-def test_group_conflicts_skips_unconfirmed_verification_records() -> None:
+def test_group_conflicts_includes_unconfirmed_verification_records() -> None:
     records = [
         {
             "candidate": _candidate(segment_index=0, proposal="统一译为德拉科。", block=0),
@@ -477,7 +477,56 @@ def test_group_conflicts_skips_unconfirmed_verification_records() -> None:
             "evidence": [],
         },
     ]
-    assert review_evidence.group_conflicts(records) == []
+    conflicts = review_evidence.group_conflicts(records)
+    assert len(conflicts) == 1
+    assert conflicts[0]["key"] == "ch01:s0"
+    assert conflicts[0]["blocks"] == ["0", "1"]
+
+
+def test_group_conflicts_can_still_restrict_to_verified_records() -> None:
+    records = [
+        {
+            "candidate": _candidate(segment_index=0, proposal="统一译为德拉科。", block=0),
+            "status": "confirmed",
+            "evidence": [],
+        },
+        {
+            "candidate": _candidate(segment_index=0, proposal="统一译为马尔福。", block=1),
+            "status": "rejected",
+            "evidence": [],
+        },
+    ]
+    assert review_evidence.group_conflicts(records, verified_only=True) == []
+
+
+def test_group_conflicts_groups_rejected_subjects_across_positions() -> None:
+    records = [
+        {
+            "candidate": _candidate(
+                chapter=1,
+                segment_index=0,
+                subject="Draco",
+                proposal="统一译为德拉科。",
+                block=0,
+            ),
+            "status": "rejected",
+            "evidence": [],
+        },
+        {
+            "candidate": _candidate(
+                chapter=2,
+                segment_index=1,
+                subject="Draco",
+                proposal="统一译为马尔福。",
+                block=1,
+            ),
+            "status": "unresolved",
+            "evidence": [],
+        },
+    ]
+    conflicts = review_evidence.group_conflicts(records)
+    assert len(conflicts) == 1
+    assert conflicts[0]["key"] == "subject:Draco"
 
 
 def test_group_conflicts_keeps_conflict_ids_deterministic() -> None:
@@ -632,3 +681,33 @@ def test_review_with_arbitration_keeps_unresolved_conflicts_flagged() -> None:
     assert result["conflicts"][0]["resolved"] is False
     assert len(result["unresolved_conflicts"]) == 1
     assert result["unresolved_conflicts"][0]["needs_human"] is True
+
+
+def test_review_with_arbitration_keeps_unverified_contradictions() -> None:
+    chapters = _chapters_with_draco()
+    segments = [
+        _segment(0, "Draco waited on the platform.", "德拉科在站台上等待。", chapter=1),
+        _segment(1, "Draco turned back.", "德拉科转过身。", chapter=3),
+    ]
+    blocks = review_blocks.plan_blocks(segments, 40, measure=len)
+    review_client = ReviewClient(
+        {
+            0: {
+                "message": "称呼漂移：德拉科。",
+                "proposal": "统一译为德拉科。",
+                "subject": "Draco",
+            },
+            1: {
+                "message": "称呼漂移：马尔福。",
+                "proposal": "统一译为马尔福。",
+                "subject": "Draco",
+            },
+        }
+    )
+    reviews = review_blocks.run_review(review_client, segments, budget=40, measure=len, workers=1)
+    evidence_client = TaskClient(verdict="rejected", decision="unresolved")
+    result = review_evidence.review_with_arbitration(evidence_client, reviews, blocks, chapters)
+    assert len(result["rejected"]) == 2
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["needs_human"] is True
+    assert len(result["unresolved_conflicts"]) == 1

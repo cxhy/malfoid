@@ -222,3 +222,49 @@ def test_render_book_joins_chapters_in_order(tmp_path: Path) -> None:
     assert rendered.startswith("# Book 1: Chapter 5-7\n\nFirst paragraph.")
     assert "# Book 1: Chapters 8-12" in rendered
     assert rendered.index("First paragraph.") < rendered.index("Third paragraph.")
+
+
+def test_render_markdown_translated_mode_uses_targets_and_falls_back_to_source() -> None:
+    chapter = {
+        "chapter": 1,
+        "title": "Chapter 1",
+        "heading_level": 1,
+        "segments": [
+            {
+                "index": 0,
+                "kind": "heading",
+                "source": "Chapter 1",
+                "source_hash": segment_state.source_hash("Chapter 1"),
+                "target": "第一章",
+                "level": 1,
+            },
+            {
+                "index": 1,
+                "kind": "text",
+                "source": "First part.",
+                "source_hash": segment_state.source_hash("First part."),
+                "target": "第一段。",
+            },
+            {
+                "index": 2,
+                "kind": "text",
+                "source": "Second part.",
+                "source_hash": segment_state.source_hash("Second part."),
+                "target": "第二段。",
+                "cont": True,
+            },
+            {
+                "index": 3,
+                "kind": "text",
+                "source": "Untranslated source.",
+                "source_hash": segment_state.source_hash("Untranslated source."),
+                "target": None,
+            },
+        ],
+    }
+    assert segment_state.render_markdown(chapter) == (
+        "# Chapter 1\n\nFirst part.Second part.\n\nUntranslated source."
+    )
+    assert segment_state.render_markdown(chapter, translated=True) == (
+        "# 第一章\n\n第一段。第二段。\n\nUntranslated source."
+    )

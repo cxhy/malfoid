@@ -12,7 +12,6 @@ back into one paragraph, so rendering never changes the logical paragraph count.
 
 from __future__ import annotations
 
-import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import batch_translate
+import build_html
 import polish_batch
 import segment_state
 
@@ -229,11 +229,11 @@ def build_reuse_map(
     return reuse, skipped
 
 
-def _archive_stale_chapters(chapters_dir: Path, keep: set[Path]) -> None:
+def _archive_stale_chapters(book_dir: Path, chapters_dir: Path, keep: set[Path]) -> None:
     stale = [path for path in chapters_dir.glob("ch-*.json") if path not in keep]
     if not stale:
         return
-    archive = chapters_dir / "archive" / _now()
+    archive = book_dir / "archive" / _now() / "chapters"
     archive.mkdir(parents=True, exist_ok=True)
     for path in stale:
         path.replace(archive / path.name)
@@ -307,7 +307,7 @@ def migrate_preview(
         path = segment_state.chapter_path(target_book, int(chapter["chapter"]))
         segment_state.save_chapter(path, chapter)
         chapter_paths.append(path)
-    _archive_stale_chapters(chapters_dir, set(chapter_paths))
+    _archive_stale_chapters(target_book, chapters_dir, set(chapter_paths))
 
     result = MigrationResult(
         book_dir=target_book,
@@ -381,6 +381,8 @@ def translate_missing(
     budget: int = batch_translate.DEFAULT_BATCH_BUDGET,
     measure=None,
     max_retries: int = batch_translate.MAX_PROTOCOL_RETRIES,
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
 ) -> TranslationResult:
     """Translate only segments that still have no target."""
     translated = failed = skipped = chapters_done = 0
@@ -391,7 +393,13 @@ def translate_missing(
         if not pending:
             continue
         results = batch_translate.translate_batch(
-            client, pending, budget=budget, measure=measure, max_retries=max_retries
+            client,
+            pending,
+            budget=budget,
+            measure=measure,
+            max_retries=max_retries,
+            glossary_terms=glossary_terms,
+            context=context,
         )
         stats = batch_translate.apply_targets(chapter, results)
         _mark_translated(chapter, results)
@@ -460,107 +468,37 @@ def polish_pending(
     )
 
 
-def _display_text(segment: dict[str, Any]) -> str:
-    target = segment.get("target")
-    if isinstance(target, str) and target.strip():
-        return target.strip()
-    return (segment.get("source") or "").strip()
+def _read_meta(book_dir: Path) -> dict[str, Any]:
+    path = book_dir / "meta.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def logical_target_blocks(chapter: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collapse target text into logical blocks, merging continuation parts."""
-    blocks: list[dict[str, Any]] = []
-    for segment in chapter.get("segments") or []:
-        text = _display_text(segment)
-        if segment.get("cont") and blocks and blocks[-1]["kind"] == "text":
-            blocks[-1]["text"] += text
-        else:
-            blocks.append(
-                {
-                    "kind": segment.get("kind"),
-                    "level": segment.get("level"),
-                    "text": text,
-                }
-            )
-    return blocks
-
-
-def render_chapter_markdown(chapter: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for block in logical_target_blocks(chapter):
-        if block["kind"] == "heading":
-            level = int(block.get("level") or chapter.get("heading_level") or 1)
-            text = _HEADING_PREFIX_RE.sub("", block["text"]).strip()
-            parts.append(f"{'#' * level} {text}")
-        else:
-            parts.append(block["text"])
-    return "\n\n".join(parts)
-
-
-def render_book_markdown(book_dir: Path) -> str:
+def _preview_title(book_dir: Path, title: str | None) -> str:
+    if title:
+        return title
+    meta = _read_meta(book_dir)
+    if meta.get("title"):
+        return str(meta["title"])
     chapters = load_chapters(book_dir)
-    return "\n\n".join(render_chapter_markdown(chapter) for chapter in chapters) + "\n"
+    if chapters and chapters[0].get("title"):
+        return str(chapters[0]["title"])
+    return book_dir.name
 
 
-def _inline_html(text: str) -> str:
-    escaped = html.escape(text)
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped, flags=re.DOTALL)
-    escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped, flags=re.DOTALL)
-    escaped = re.sub(r"`(.+?)`", r"<code>\1</code>", escaped, flags=re.DOTALL)
-    escaped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', escaped)
-    return escaped
-
-
-def render_chapter_html(chapter: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for block in logical_target_blocks(chapter):
-        if block["kind"] == "heading":
-            level = int(block.get("level") or chapter.get("heading_level") or 1)
-            level = min(max(level, 1), 6)
-            text = _HEADING_PREFIX_RE.sub("", block["text"]).strip()
-            parts.append(f"<h{level}>{_inline_html(text)}</h{level}>")
-        else:
-            parts.append(f"<p>{_inline_html(block['text'])}</p>")
-    return "\n".join(parts)
-
-
-def render_book_html(book_dir: Path, title: str | None = None, author: str | None = None) -> str:
-    book = Path(book_dir)
-    meta_path = book / "meta.json"
-    meta: dict[str, Any] = {}
-    if meta_path.is_file():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    resolved_title = title or meta.get("title") or book.name
-    resolved_author = author if author is not None else meta.get("author") or ""
-    chapters = load_chapters(book)
-    body = "\n".join(render_chapter_html(chapter) for chapter in chapters)
-    author_html = (
-        f'<div class="book-author">{html.escape(resolved_author)}</div>' if resolved_author else ""
-    )
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{html.escape(resolved_title)}</title>
-<style>
-body {{ font-family: 'FangSong', 'STFangSong', serif; line-height: 1.8; color: #333;
-       max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: #fefefe; }}
-h1, h2, h3 {{ line-height: 1.4; margin: 1.6rem 0 0.8rem; }}
-p {{ margin: 0 0 1rem; white-space: pre-wrap; text-align: justify; }}
-.book-title {{ text-align: center; margin-top: 0; }}
-.book-author {{ text-align: center; color: #666; }}
-</style>
-</head>
-<body>
-<article>
-<h1 class="book-title">{html.escape(resolved_title)}</h1>
-{author_html}
-{body}
-</article>
-</body>
-</html>
-"""
+def _ensure_preview_meta(book_dir: Path, title: str, author: str | None) -> dict[str, Any]:
+    """Create or update the minimal metadata the HTML template renderer needs."""
+    meta = _read_meta(book_dir)
+    meta["title"] = title
+    meta["author"] = author if author is not None else str(meta.get("author") or "")
+    path = book_dir / "meta.json"
+    path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return meta
 
 
 def write_preview(
@@ -570,14 +508,19 @@ def write_preview(
     title: str | None = None,
     author: str | None = None,
 ) -> RenderResult:
-    """Render segment state to one Markdown and one HTML preview file."""
+    """Render translated segment state to Markdown and template HTML."""
     book = Path(book_dir)
+    meta = _read_meta(book)
+    resolved_title = _preview_title(book, title)
+    resolved_author = author if author is not None else str(meta.get("author") or "")
+    _ensure_preview_meta(book, resolved_title, resolved_author)
+
     out = Path(output_dir) if output_dir is not None else book / "translation" / PREVIEW_DIR
     out.mkdir(parents=True, exist_ok=True)
     markdown_path = out / PREVIEW_MARKDOWN
     html_path = out / PREVIEW_HTML
-    markdown_path.write_text(render_book_markdown(book), encoding="utf-8")
-    html_path.write_text(render_book_html(book, title=title, author=author), encoding="utf-8")
+    markdown_path.write_text(segment_state.render_book(book, translated=True), encoding="utf-8")
+    build_html.build_from(book, markdown_path, html_path, resolved_title)
     return RenderResult(markdown=markdown_path, html=html_path)
 
 
@@ -592,6 +535,8 @@ def run_preview(
     output_dir: Path | None = None,
     budget: int = batch_translate.DEFAULT_BATCH_BUDGET,
     max_segment_tokens: int | None = segment_state.DEFAULT_SEGMENT_TOKEN_BUDGET,
+    glossary_terms: list[Any] | None = None,
+    context: str | None = None,
 ) -> PreviewResult:
     """Migrate, retranslate missing segments, polish, and render the preview."""
     migration = migrate_preview(
@@ -604,7 +549,13 @@ def run_preview(
     translation: TranslationResult | None = None
     polish_result: PolishResult | None = None
     if client is not None:
-        translation = translate_missing(migration.book_dir, client, budget=budget)
+        translation = translate_missing(
+            migration.book_dir,
+            client,
+            budget=budget,
+            glossary_terms=glossary_terms,
+            context=context,
+        )
         if polish:
             polish_result = polish_pending(migration.book_dir, client, budget=budget)
     elif migration.unmatched:

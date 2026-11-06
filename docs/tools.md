@@ -59,6 +59,24 @@ virtualenv; most accept `--help`.
 |---|---|
 | `incremental_update.py` | content-addressed rechunking after a source revision |
 
+## Pipeline v2
+
+| Tool | Purpose |
+|---|---|
+| `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
+| `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
+| `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
+| `review_book_v2.py` | generic whole-book review runner (blocks, evidence, reports) |
+| `book_delivery.py` | render translated segment state to `translation/<title>.md/.html` |
+| `review_blocks.py` | plan review blocks, validate structured output and bisect |
+| `review_evidence.py` | verify review candidates and arbitrate conflicts |
+| `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
+
+Migration path: run `preview_pipeline.py` on the legacy work with the chunk ids that
+already have translations, then validate review with `review_preview.py` before
+committing to Book 1 mass translation. Legacy `proofread/` artifacts remain for old
+works; v2 review artifacts live under `translation/review/`.
+
 ## Vendored skills
 
 The pipeline uses three MIT-licensed agent skills under `.pi/skills/`:

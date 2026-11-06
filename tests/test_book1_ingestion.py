@@ -284,5 +284,7 @@ def test_reingest_archives_stale_chapter_state(tmp_path: Path) -> None:
     )
     segment_state.ingest_sources(book, _sources(tmp_path), complete=True)
     assert not stale.exists()
-    archived = list((book / "source" / "chapters" / "archive").rglob("ch-99.json"))
+    archived = list((book / "archive").rglob("ch-99.json"))
     assert len(archived) == 1
+    assert archived[0].parent.name == "chapters"
+    assert "source/chapters/archive" not in str(archived[0])

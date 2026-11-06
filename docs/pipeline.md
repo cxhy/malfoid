@@ -133,6 +133,56 @@ changed chunks are marked pending. The previous `source/`, `work_temp/`, `meta.j
 `polished/`, `proofread/` and deliverables are archived under
 `works/<work>/archive/<timestamp>/`.
 
+## Pipeline v2
+
+v2 keeps the same file-based contract but makes **段** the state unit. A book
+sub-work stores one JSON document per chapter under `source/chapters/`; Markdown
+and HTML are generated delivery layers. Legacy v1 works and tools are untouched.
+
+```text
+works/<series>/books/book-01/
+├── meta.json
+├── source/chapters/ch-01.json      chapter segments (source hash + target)
+├── work_temp/glossary.json         book glossary working copy
+├── translation/
+│   ├── <Title>.md / <Title>.html   v2 delivery
+│   └── review/                     structured review reports + summaries
+└── archive/<timestamp>/            superseded state and delivery artifacts
+```
+
+Stale chapter state is archived under `<book>/archive/<timestamp>/chapters/`, never
+inside the live `source/chapters/` directory.
+
+### Preview migration
+
+Move the existing two-block preview into segment state:
+
+```bash
+python tools/preview_pipeline.py works/<legacy-work> --chunks 1 2
+python tools/preview_pipeline.py works/<legacy-work> --migrate-only
+```
+
+Legacy translations are reused by source hash (polished before draft); unmatched
+segments are retranslated through the batch protocol and then polished. Preview
+prompts include glossary terms relevant to the batch plus read-only excerpts from
+neighbouring legacy chunks. Output is `translation/preview/book.md` and
+`translation/preview/book.html`, rendered through the bundled web template.
+
+### Review and delivery
+
+```bash
+python tools/review_preview.py works/<legacy-work>/preview_v2
+python tools/review_book_v2.py works/<series>/books/book-01
+python tools/book_delivery.py works/<series>/books/book-01
+```
+
+`review_preview.py` plans review blocks over the whole preview, maps global review
+indices back to chapter/local positions, records alignment and false-positive
+metrics, and writes a Book 1 GO/NO-GO acceptance record. `review_book_v2.py` is the
+generic whole-book review runner. Both write only under `translation/review/` and
+stay advisory. `book_delivery.py` renders translated segment state to
+`translation/<title>.md` and `translation/<title>.html` through `build_html.py`.
+
 ## Model configuration
 
 All model-calling tools resolve the endpoint in this order:

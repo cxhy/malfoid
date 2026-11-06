@@ -410,3 +410,38 @@ def test_run_review_reads_segments_from_tmp_path_chapter_state(tmp_path: Path) -
     assert results[0]["reviewed_segments"] == 2
     assert results[0]["complete"] is True
     assert results[0]["segments"] == [0, 1]
+
+
+def test_build_review_prompt_requests_optional_subject_and_proposal() -> None:
+    prompt = review_blocks.build_review_prompt([_segment(0, "Draco waited.", "德拉科等待着。")])
+    assert "subject" in prompt
+    assert "proposal" in prompt
+
+
+def test_validate_review_output_preserves_optional_subject_and_proposal() -> None:
+    issue = {
+        "segment_index": 0,
+        "message": "称呼漂移。",
+        "subject": "Draco",
+        "proposal": "统一译为德拉科。",
+    }
+    payload = json.dumps(
+        {"issues": [issue], "reviewed_segments": 1, "complete": True},
+        ensure_ascii=False,
+    )
+    result = review_blocks.validate_review_output(payload, 1)
+    assert result["issues"] == [issue]
+
+
+def test_validate_review_output_rejects_invalid_optional_fields() -> None:
+    for field in ("subject", "proposal"):
+        payload = json.dumps(
+            {
+                "issues": [{"segment_index": 0, "message": "问题。", field: ""}],
+                "reviewed_segments": 1,
+                "complete": True,
+            },
+            ensure_ascii=False,
+        )
+        with pytest.raises(review_blocks.ReviewProtocolError, match=field):
+            review_blocks.validate_review_output(payload, 1)

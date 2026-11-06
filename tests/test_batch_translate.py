@@ -214,3 +214,35 @@ def test_apply_targets_skips_a_result_without_source_hash() -> None:
     stats = batch_translate.apply_targets(chapter, [{"index": 0, "target": "一"}])
     assert chapter["segments"][0]["target"] is None
     assert stats == {"applied": 0, "failed": 0, "skipped": 1}
+
+
+def test_build_batch_prompt_injects_relevant_glossary_and_context() -> None:
+    segments = [_segment(0, "Draco waited."), _segment(1, "He left.")]
+    prompt = batch_translate.build_batch_prompt(
+        segments,
+        glossary_terms=[
+            {"source": "Draco", "target": "德拉科", "aliases": ["Darcy"]},
+            {"source": "Harry", "target": "哈利"},
+        ],
+        context="Previous chunk excerpt: Harry met Draco.",
+    )
+    assert "Draco => 德拉科" in prompt
+    assert "aliases: Darcy" in prompt
+    assert "Harry => 哈利" not in prompt
+    assert "Previous chunk excerpt: Harry met Draco." in prompt
+
+
+def test_translate_batch_injects_context_into_batch_and_fallback_prompts() -> None:
+    segments = [_segment(0, "Draco waited."), _segment(1, "Draco left.")]
+    wrong = _payload("一")
+    client = SequenceClient([wrong, wrong, wrong, _single("一"), _single("二")])
+    results = batch_translate.translate_batch(
+        client,
+        segments,
+        budget=2000,
+        glossary_terms=[{"source": "Draco", "target": "德拉科"}],
+        context="Neighbour excerpt.",
+    )
+    assert [result["target"] for result in results] == ["一", "二"]
+    assert all("Draco => 德拉科" in prompt for prompt in client.prompts)
+    assert all("Neighbour excerpt." in prompt for prompt in client.prompts)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -27,12 +28,25 @@ ZH_FONT = "'FangSong', '仿宋', 'STFangSong', '华文仿宋', serif"
 ZH_TOC = "目录"
 
 
+def _pandoc_executable() -> str:
+    """Find pandoc on PATH, then fall back to the pypandoc bundled binary."""
+    found = shutil.which("pandoc")
+    if found:
+        return found
+    try:
+        import pypandoc
+
+        return pypandoc.get_pandoc_path()
+    except Exception:
+        return "pandoc"
+
+
 def pandoc_body(md: Path, title: str) -> str:
     with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
         out = Path(tmp.name)
     subprocess.run(
         [
-            "pandoc",
+            _pandoc_executable(),
             str(md),
             "-o",
             str(out),

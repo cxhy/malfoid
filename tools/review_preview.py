@@ -2,9 +2,10 @@
 """Preview review validation and Book 1 go/no-go decision (pipeline v2, ticket 11).
 
 The migrated two-block preview is reviewed end-to-end through the structured
-review architecture: blocks are planned per chapter so chapter-local segment
-indices stay unambiguous, candidates are verified against bounded evidence, and
-reports are written under the preview book's ``translation/review`` area.
+review architecture. Blocks are planned once over the whole book as one contiguous
+sequence; each segment carries an unambiguous global review index, and issues are
+mapped back to chapter/local positions before evidence verification. Reports are
+written under the preview book's ``translation/review`` area.
 
 Before evidence verification every reported issue is checked against the segment
 state. An issue that does not trace to an aligned source/target pair is dropped
@@ -22,12 +23,12 @@ import argparse
 import json
 import os
 import re
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 import preview_migration
 import review_blocks
+import review_book_v2
 import review_evidence
 import review_reports
 import segment_state
@@ -39,13 +40,6 @@ DEFAULT_MAX_FALSE_POSITIVE_RATE = 0.5
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
-
-REVIEW_SYSTEM = (
-    "You are a meticulous bilingual literary reviewer. Compare each numbered "
-    "English source segment with its Chinese target segment. Report only issues "
-    "supported by the supplied text, and follow the requested JSON protocol "
-    "exactly. Never rewrite or translate the text."
-)
 
 
 def _position(chapter: int, index: int, reason: str) -> dict[str, Any]:
@@ -149,53 +143,6 @@ def load_reuse_map(book_dir: Path) -> dict[str, dict[str, str]] | None:
     return reuse or None
 
 
-def _chapter_segments(chapter: dict[str, Any], number: int) -> list[dict[str, Any]]:
-    segments: list[dict[str, Any]] = []
-    for segment in chapter.get("segments") or []:
-        item = dict(segment)
-        item["chapter"] = number
-        segments.append(item)
-    return segments
-
-
-def _review_chapters(
-    client: Any,
-    chapters: list[dict[str, Any]],
-    *,
-    budget: int,
-    workers: int,
-    max_bisect_depth: int,
-    max_segment_retries: int,
-    measure=None,
-    cache_dir: Path | None = None,
-) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
-    """Review each chapter separately so segment indices stay unambiguous."""
-    reviews: list[dict[str, Any]] = []
-    blocks: list[list[dict[str, Any]]] = []
-    for position, chapter in enumerate(chapters):
-        number = int(chapter.get("chapter") or position + 1)
-        segments = _chapter_segments(chapter, number)
-        if not segments:
-            continue
-        planned = review_blocks.plan_blocks(segments, budget, measure)
-        chapter_cache = Path(cache_dir) / f"ch-{number:02d}" if cache_dir is not None else None
-        results = review_blocks.run_review(
-            client,
-            segments,
-            budget=budget,
-            workers=workers,
-            max_bisect_depth=max_bisect_depth,
-            max_segment_retries=max_segment_retries,
-            measure=measure,
-            cache_dir=chapter_cache,
-        )
-        if len(results) != len(planned):
-            raise RuntimeError("review block planning changed between plan and run")
-        reviews.extend(results)
-        blocks.extend(planned)
-    return reviews, blocks
-
-
 def _misaligned_keys(alignment: dict[str, Any]) -> set[tuple[int, int]]:
     return {
         (int(item["chapter"]), int(item["segment_index"]))
@@ -203,41 +150,50 @@ def _misaligned_keys(alignment: dict[str, Any]) -> set[tuple[int, int]]:
     }
 
 
-def _filter_issues(
+def _map_and_filter_reviews(
     reviews: list[dict[str, Any]],
-    blocks: list[list[dict[str, Any]]],
+    global_map: dict[int, tuple[int, int]],
     misaligned_keys: set[tuple[int, int]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Drop issues that do not trace to an aligned source/target position."""
+    """Map global review indices to chapter/local positions and drop misaligned issues."""
+    mapped, invalid = review_book_v2.map_reviews(reviews, global_map)
     cleaned: list[dict[str, Any]] = []
-    invalid: list[dict[str, Any]] = []
-    for review, block in zip(reviews, blocks):
-        chapter = int(block[0]["chapter"]) if block else 0
-        by_index = {int(segment.get("index", -1)): segment for segment in block}
+    for review in mapped:
         issues: list[dict[str, Any]] = []
         for issue in review.get("issues") or []:
-            index = int(issue.get("segment_index", -1))
-            segment = by_index.get(index)
-            reason: str | None = None
-            if segment is None:
-                reason = "issue references a segment outside its review block"
-            elif (chapter, index) in misaligned_keys:
-                reason = "misaligned anchor"
-            elif not isinstance(segment.get("target"), str) or not segment["target"].strip():
-                reason = "missing target"
-            if reason is None:
-                issues.append(issue)
+            chapter = int(issue["chapter"])
+            index = int(issue["segment_index"])
+            if (chapter, index) in misaligned_keys:
+                invalid.append(
+                    {
+                        **_position(chapter, index, "misaligned anchor"),
+                        "message": issue.get("message") or "",
+                        "global_segment_index": issue.get("global_segment_index"),
+                    }
+                )
                 continue
-            invalid.append(
-                {
-                    **_position(chapter, index, reason),
-                    "message": issue.get("message") or "",
-                }
-            )
+            issues.append(issue)
         copy = dict(review)
         copy["issues"] = issues
         cleaned.append(copy)
     return cleaned, invalid
+
+
+def _filter_candidates(
+    candidates: list[dict[str, Any]],
+    global_map: dict[int, tuple[int, int]],
+    misaligned_keys: set[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    """Map global candidates and keep only aligned positions."""
+    mapped, _ = review_book_v2.map_candidates(candidates, global_map)
+    kept: list[dict[str, Any]] = []
+    for candidate in mapped:
+        chapter = int(candidate["chapter"])
+        index = int(candidate["segment_index"])
+        if (chapter, index) in misaligned_keys:
+            continue
+        kept.append(candidate)
+    return kept
 
 
 def compute_metrics(
@@ -398,9 +354,11 @@ def run_preview_review(
         reuse_map = load_reuse_map(book)
 
     alignment = check_alignment(chapters, reuse_map)
-    reviews, blocks = _review_chapters(
+    segments, global_map = review_book_v2.flatten_segments(chapters)
+    blocks = review_blocks.plan_blocks(segments, budget, measure)
+    reviews = review_blocks.run_review(
         client,
-        chapters,
+        segments,
         budget=budget,
         workers=workers,
         max_bisect_depth=max_bisect_depth,
@@ -408,8 +366,13 @@ def run_preview_review(
         measure=measure,
         cache_dir=cache_dir,
     )
-    reviews, invalid_issues = _filter_issues(reviews, blocks, _misaligned_keys(alignment))
-    evidence = review_evidence.review_with_arbitration(client, reviews, blocks, chapters)
+    if len(reviews) != len(blocks):
+        raise RuntimeError("review block planning changed between plan and run")
+    candidates = review_evidence.collect_candidates(reviews, blocks)
+    misaligned_keys = _misaligned_keys(alignment)
+    reviews, invalid_issues = _map_and_filter_reviews(reviews, global_map, misaligned_keys)
+    candidates = _filter_candidates(candidates, global_map, misaligned_keys)
+    evidence = review_book_v2.verify_and_arbitrate(client, candidates, chapters)
     metrics = compute_metrics(reviews, evidence, invalid_issues, alignment)
     decision = decide_go_no_go(
         metrics,
@@ -422,6 +385,8 @@ def run_preview_review(
         "book_dir": str(book),
         "advisory": True,
         "alignment": alignment,
+        "segments": segments,
+        "blocks": blocks,
         "reviews": reviews,
         "evidence": evidence,
         "metrics": metrics,
@@ -432,41 +397,6 @@ def run_preview_review(
     json_path, markdown_path = write_acceptance(book, result)
     result["acceptance"] = {"json": str(json_path), "markdown": str(markdown_path)}
     return result
-
-
-class ReviewModelClient:
-    """OpenAI-compatible client adapter for the local review provider."""
-
-    def __init__(self, model: str, effort: str, max_tokens: int) -> None:
-        from translate_chunk import load_config
-
-        self.base_url, self.api_key = load_config()
-        self.model = model
-        self.effort = effort
-        self.max_tokens = max_tokens
-
-    def __call__(self, prompt: str) -> str:
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": REVIEW_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": self.max_tokens,
-            "reasoning_effort": self.effort,
-        }
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=600) as response:
-            data = json.loads(response.read())
-        return data["choices"][0]["message"]["content"]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -494,7 +424,7 @@ def main(argv: list[str] | None = None) -> None:
     cache_dir = None
     if not args.no_cache:
         cache_dir = args.cache_dir or args.book_dir / "work_temp" / "review_cache"
-    client = ReviewModelClient(args.model, args.effort, args.max_tokens)
+    client = review_book_v2.ReviewModelClient(args.model, args.effort, args.max_tokens)
     result = run_preview_review(
         args.book_dir,
         client,
