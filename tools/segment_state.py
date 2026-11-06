@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from token_budget import estimate_tokens
@@ -434,6 +435,7 @@ def ingest_sources(
     source_paths: list[Path],
     chapter_offset: int = 0,
     max_segment_tokens: int | None = DEFAULT_SEGMENT_TOKEN_BUDGET,
+    complete: bool = False,
 ) -> list[Path]:
     """Ingest several serialized source files into one continuous book.
 
@@ -466,11 +468,22 @@ def ingest_sources(
         raise ValueError("duplicate chapter numbers across source files")
     chapters.sort(key=lambda chapter: int(chapter["chapter"]))
 
+    chapters_dir = book_dir / "source" / CHAPTERS_DIR
+    chapters_dir.mkdir(parents=True, exist_ok=True)
     paths_out: list[Path] = []
     for chapter in chapters:
         path = chapter_path(book_dir, int(chapter["chapter"]))
         save_chapter(path, chapter)
         paths_out.append(path)
+
+    stale = [path for path in chapters_dir.glob("ch-*.json") if path not in paths_out]
+    if stale:
+        archive = (
+            chapters_dir / "archive" / datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+        archive.mkdir(parents=True, exist_ok=True)
+        for path in stale:
+            path.replace(archive / path.name)
 
     source_dir = book_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -485,7 +498,7 @@ def ingest_sources(
         meta["word_count"] = sum(record["words"] for record in meta["chapters"])
         meta["source_files"] = [str(path) for path in paths]
         meta.setdefault("source_file", str(paths[0]))
-        meta["source_complete"] = True
+        meta["source_complete"] = bool(complete)
         meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

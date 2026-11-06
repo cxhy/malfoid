@@ -117,7 +117,7 @@ def _sources(tmp_path: Path) -> list[Path]:
 def _ingest_book1(tmp_path: Path) -> tuple[Path, Path]:
     root = _series(tmp_path)
     book = book_state.resolve_book(root, 1)
-    segment_state.ingest_sources(book, _sources(tmp_path))
+    segment_state.ingest_sources(book, _sources(tmp_path), complete=True)
     return root, book
 
 
@@ -219,7 +219,7 @@ def test_chapter_offset_continues_numbering_across_sources(tmp_path: Path) -> No
     first.write_text(OFFSET_ONE, encoding="utf-8")
     second.write_text(OFFSET_TWO, encoding="utf-8")
 
-    segment_state.ingest_sources(book, [first, second], chapter_offset=4)
+    segment_state.ingest_sources(book, [first, second], chapter_offset=4, complete=True)
     meta = json.loads((book / "meta.json").read_text(encoding="utf-8"))
     assert [record["index"] for record in meta["chapters"]] == [5, 6, 7, 8]
     assert [record["title"] for record in meta["chapters"]] == [
@@ -233,7 +233,7 @@ def test_chapter_offset_continues_numbering_across_sources(tmp_path: Path) -> No
 def test_reingesting_the_same_sources_keeps_metadata_stable(tmp_path: Path) -> None:
     _, book = _ingest_book1(tmp_path)
     sources = _sources(tmp_path)
-    segment_state.ingest_sources(book, sources)
+    segment_state.ingest_sources(book, sources, complete=True)
     meta = json.loads((book / "meta.json").read_text(encoding="utf-8"))
     assert meta["chapter_count"] == len(EXPECTED_CHAPTERS)
     assert meta["source_files"] == [str(path) for path in sources]
@@ -258,6 +258,31 @@ def test_prescan_runs_on_the_ingested_book_with_cache_reuse(tmp_path: Path) -> N
     assert "STORY BIBLE BODY" in result.series_bible.read_text(encoding="utf-8")
 
     calls_after_first = client.digest_calls
+    calls_total_after_first = len(client.calls)
     second = prescan_book.run_prescan(book, client, workers=2, series_root=root)
     assert client.digest_calls == calls_after_first
+    assert len(client.calls) == calls_total_after_first
     assert all(entry["generated"] is False for entry in second.digests)
+
+
+def test_partial_ingest_is_not_marked_complete(tmp_path: Path) -> None:
+    root = _series(tmp_path)
+    book = book_state.resolve_book(root, 1)
+    sources = _sources(tmp_path)
+    segment_state.ingest_sources(book, sources[:1])
+    meta = json.loads((book / "meta.json").read_text(encoding="utf-8"))
+    assert meta["source_complete"] is False
+    assert prescan_book.should_prescan(book) is False
+
+
+def test_reingest_archives_stale_chapter_state(tmp_path: Path) -> None:
+    _, book = _ingest_book1(tmp_path)
+    stale = segment_state.chapter_path(book, 99)
+    segment_state.save_chapter(
+        stale,
+        {"chapter": 99, "title": "Stale", "heading_level": 1, "segments": []},
+    )
+    segment_state.ingest_sources(book, _sources(tmp_path), complete=True)
+    assert not stale.exists()
+    archived = list((book / "source" / "chapters" / "archive").rglob("ch-99.json"))
+    assert len(archived) == 1

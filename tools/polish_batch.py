@@ -16,8 +16,8 @@ from batch_translate import (
     DEFAULT_BATCH_BUDGET,
     MAX_PROTOCOL_RETRIES,
     ProtocolError,
-    _extract_targets,
     apply_targets,
+    extract_targets,
 )
 from model_client import call_client
 from token_budget import estimate_tokens
@@ -59,7 +59,7 @@ def build_single_polish_prompt(segment: dict[str, Any]) -> str:
 
 def validate_polish_output(text: Any, expected: int) -> list[str]:
     """Validate the completeness/count/non-empty contract for polished targets."""
-    return _extract_targets(text, expected)
+    return extract_targets(text, expected)
 
 
 def plan_polish_batches(

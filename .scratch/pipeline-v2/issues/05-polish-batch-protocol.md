@@ -19,3 +19,5 @@
 - Public seam: `plan_polish_batches`, `polish_batch`, `validate_polish_output`, `apply_polished`, `ProtocolError`.
 - Tests: 14 ticket tests passed; full suite 106 passed; ruff check/format clean.
 - Deferred: glossary and neighbour-context injection into polish prompts belongs to the translation wiring ticket; a separate polished field in segment state is not introduced because polish writes validated results back to `target`.
+
+- Review fix: polish now imports the public `extract_targets` instead of translation's private helper. Successful polish still replaces `target`; pre-polish text remains in the result's `original` field, matching the ticket's accepted comment.

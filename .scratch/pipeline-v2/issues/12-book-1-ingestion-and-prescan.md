@@ -20,3 +20,6 @@
 - Tests: 6 ticket tests passed; full suite 98 passed; ruff check/format clean.
 - Manual acceptance on the three actual Book 1 source files: 11 chapters (5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 17); paragraph counts 130/390/228/130/296/194/287/165/163/264/262; prescan ready, 11 digests, style brief/synopsis/book bible/series bible written, no translation files. Source content was not committed.
 - Deferred: chapter records do not retain per-chapter source-file attribution; stale chapter state from a different prior ingestion is not pruned; prescan style/synopsis/bible remain regenerated from cached digests.
+
+- Review fixes: `source_complete` is set only when `ingest_sources(..., complete=True)`; partial ingest stays not-ready. Stale chapter files are archived under `source/chapters/archive/<timestamp>/` instead of lingering in the live set. Prescan now caches style brief, synopsis and book bible by digest-context hash.
+- Book 1 gaps at chapters 11 and 16 reflect the source's own omissions; chapter 5 has no explicit marker, so its title is inferred as `Ch 5`.

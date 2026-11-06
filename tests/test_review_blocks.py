@@ -219,7 +219,7 @@ def test_run_review_returns_structured_results_in_block_order() -> None:
         _segment(3, "w" * 10, "火车开动了。"),
     ]
     client = ReviewClient()
-    results = review_blocks.run_review(client, segments, budget=20, measure=len, workers=2)
+    results = review_blocks.run_review(client, segments, budget=40, measure=len, workers=2)
     assert [result["segments"] for result in results] == [[0, 1], [2, 3]]
     assert [result["reviewed_segments"] for result in results] == [2, 2]
     assert [result["complete"] for result in results] == [True, True]
@@ -357,7 +357,7 @@ def test_run_review_runs_blocks_in_parallel_with_a_configured_worker_count() -> 
                     self.active -= 1
 
     client = BarrierClient()
-    review_blocks.run_review(client, segments, budget=1, measure=lambda text: 1, workers=2)
+    review_blocks.run_review(client, segments, budget=2, measure=lambda text: 1, workers=2)
     assert client.max_active == 2
 
 
@@ -382,7 +382,7 @@ def test_run_review_with_one_worker_serializes_blocks() -> None:
                     self.active -= 1
 
     client = SlowClient()
-    review_blocks.run_review(client, segments, budget=1, measure=lambda text: 1, workers=1)
+    review_blocks.run_review(client, segments, budget=2, measure=lambda text: 1, workers=1)
     assert client.max_active == 1
 
 

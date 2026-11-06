@@ -10,9 +10,11 @@ returns suggestions only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from batch_translate import DEFAULT_BATCH_BUDGET
@@ -47,7 +49,7 @@ def plan_blocks(
     current: list[dict[str, Any]] = []
     used = 0
     for segment in segments:
-        size = measure(segment.get("source") or "")
+        size = measure(segment.get("source") or "") + measure(segment.get("target") or "")
         if size > budget:
             raise ValueError(
                 f"segment {segment.get('index')} needs {size} units and exceeds "
@@ -110,13 +112,16 @@ def _parse_json(text: Any) -> Any:
         raise ReviewProtocolError("model output is not valid JSON") from None
 
 
-def validate_review_output(text: Any, expected_segments: int) -> dict[str, Any]:
+def validate_review_output(
+    text: Any, expected_segments: int, allowed_indices: set[int] | None = None
+) -> dict[str, Any]:
     """Validate one structured review payload and return a normalized copy.
 
     Accepts raw model text or an already parsed object. The payload must have
     ``complete: true``, an integer ``reviewed_segments`` equal to the block size,
     and an ``issues`` array whose entries carry an integer ``segment_index`` and
-    a non-empty ``message``.
+    a non-empty ``message``. When ``allowed_indices`` is given, every issue index
+    must be inside the reviewed block.
     """
     payload = text if isinstance(text, dict) else _parse_json(text)
     if not isinstance(payload, dict):
@@ -140,6 +145,8 @@ def validate_review_output(text: Any, expected_segments: int) -> dict[str, Any]:
         index = issue.get("segment_index")
         if isinstance(index, bool) or not isinstance(index, int):
             raise ReviewProtocolError(f"issue {position} is missing an integer segment_index")
+        if allowed_indices is not None and index not in allowed_indices:
+            raise ReviewProtocolError(f"issue {position} references a segment outside the block")
         message = issue.get("message")
         if not isinstance(message, str) or not message.strip():
             raise ReviewProtocolError(f"issue {position} is missing a non-empty message")
@@ -202,7 +209,10 @@ def _failure(
 
 
 def _review_once(client: Any, block: list[dict[str, Any]]) -> dict[str, Any]:
-    return validate_review_output(call_client(client, build_review_prompt(block)), len(block))
+    allowed = {segment.get("index") for segment in block}
+    return validate_review_output(
+        call_client(client, build_review_prompt(block)), len(block), allowed
+    )
 
 
 def _review_leaf(
@@ -299,6 +309,25 @@ def review_block(
     }
 
 
+def block_cache_key(block: list[dict[str, Any]]) -> str:
+    payload = [
+        (segment.get("index"), segment.get("source_hash"), segment.get("target"))
+        for segment in block
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_cache(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) and data.get("complete") is True else None
+
+
 def run_review(
     client: Any,
     segments: list[dict[str, Any]],
@@ -308,21 +337,38 @@ def run_review(
     max_bisect_depth: int = DEFAULT_BISECT_DEPTH,
     max_segment_retries: int = DEFAULT_SEGMENT_RETRIES,
     measure=None,
+    cache_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Plan and review blocks in parallel, returning results in block order."""
+    """Plan and review blocks in parallel, returning results in block order.
+
+    When ``cache_dir`` is given, a complete block result is written by block
+    identity and reused on a later run; invalid blocks are not cached.
+    """
     if workers < 1:
         raise ValueError("workers must be at least 1")
     blocks = plan_blocks(segments, budget, measure)
     if not blocks:
         return []
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
     def review_one(block: list[dict[str, Any]]) -> dict[str, Any]:
-        return review_block(
+        cache_path = cache_dir / f"{block_cache_key(block)}.json" if cache_dir is not None else None
+        if cache_path is not None:
+            cached = _read_cache(cache_path)
+            if cached is not None:
+                return cached
+        result = review_block(
             client,
             block,
             max_bisect_depth=max_bisect_depth,
             max_segment_retries=max_segment_retries,
         )
+        if cache_path is not None and result.get("complete") is True:
+            cache_path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        return result
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(review_one, blocks))

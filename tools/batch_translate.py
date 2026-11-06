@@ -108,7 +108,7 @@ def _parse_payload(text: Any) -> Any:
         raise ProtocolError("model output is not valid JSON") from None
 
 
-def _extract_targets(text: Any, expected: int) -> list[str]:
+def extract_targets(text: Any, expected: int) -> list[str]:
     """Validate the completeness/count/non-empty contract and return clean targets."""
     payload = _parse_payload(text)
     if not isinstance(payload, dict):
@@ -156,7 +156,7 @@ def _fallback(client: Any, segments: list[dict[str, Any]]) -> list[dict[str, Any
     results = []
     for segment in segments:
         try:
-            targets = _extract_targets(call_client(client, build_single_prompt(segment)), 1)
+            targets = extract_targets(call_client(client, build_single_prompt(segment)), 1)
         except Exception as exc:
             results.append(
                 _result(
@@ -208,7 +208,7 @@ def translate_batch(
         for _ in range(max_retries + 1):
             attempts += 1
             try:
-                targets = _extract_targets(
+                targets = extract_targets(
                     call_client(client, build_batch_prompt(batch)), len(batch)
                 )
             except ProtocolError:

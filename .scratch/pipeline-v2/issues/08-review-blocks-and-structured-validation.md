@@ -20,3 +20,6 @@
 - Public seam: `plan_blocks`, `validate_review_output`, `build_review_prompt`, `review_block`, `run_review`, `ReviewProtocolError`.
 - Tests: 24 ticket tests passed; full suite 116 passed; ruff check/format clean.
 - Deferred: evidence verification and conflict arbitration belong to ticket 09; review report artifacts and PASS/FAIL summaries belong to ticket 10.
+
+- Review fixes: block budget now measures source plus target tokens; issue `segment_index` must be inside the reviewed block; `run_review` accepts an optional `cache_dir` and reuses complete block results for resume.
+- Reports, evidence verification and conflict arbitration remain tickets 09/10.

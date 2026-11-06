@@ -274,6 +274,17 @@ def _merge_context(context: str) -> str:
     return f"Use this complete book digest as the only source:\n\n{context}"
 
 
+def _ask_cached(client: object, cache_path: Path, prompt: str) -> str:
+    if cache_path.is_file():
+        cached = cache_path.read_text(encoding="utf-8").strip()
+        if cached:
+            return cached
+    text = _ask(client, prompt)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(text + "\n", encoding="utf-8")
+    return text
+
+
 def run_prescan(
     book_dir: Path,
     client: object,
@@ -289,23 +300,28 @@ def run_prescan(
     digests = run_digests(book_dir, client, workers=workers)
     context = _digest_context(digests)
     title = _book_title(book_dir)
+    context_hash = segment_state.source_hash(context)
+    cache_dir = prescan_dir(book_dir) / "cache"
 
-    style = _ask(
+    style = _ask_cached(
         client,
+        cache_dir / f"{context_hash}-style.md",
         f"{STYLE_BRIEF_TASK}\n"
         "Describe the book's style for a translator: register, rhythm, "
         "sentence length, dialogue habits, recurring imagery and tone.\n\n"
         f"{_merge_context(context)}",
     )
-    synopsis = _ask(
+    synopsis = _ask_cached(
         client,
+        cache_dir / f"{context_hash}-synopsis.md",
         f"{SYNOPSIS_TASK}\n"
         "Write a book synopsis for a translator: plot order, turning points, "
         "ending state and relationships. Do not import canon events.\n\n"
         f"{_merge_context(context)}",
     )
-    bible = _ask(
+    bible = _ask_cached(
         client,
+        cache_dir / f"{context_hash}-bible.md",
         f"{STORY_BIBLE_TASK}\n"
         "Write a book story bible for a translator: characters, names, pronouns, "
         "settings, timeline, AU rules and canon divergences.\n\n"
