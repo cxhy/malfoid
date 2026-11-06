@@ -27,3 +27,5 @@
 - Tests: 30 ticket tests passed; full suite 168 passed; ruff check/format clean.
 - Deferred: report artifacts and PASS/FAIL summaries belong to ticket 10; preview
   end-to-end validation belongs to ticket 11.
+
+- Final review fix (`a464cbf`): review issues carry optional `subject`/`proposal`; contradictions group across blocks by subject even when evidence is unconfirmed; `review_with_arbitration` no longer defaults to dropping unverified contradictions.

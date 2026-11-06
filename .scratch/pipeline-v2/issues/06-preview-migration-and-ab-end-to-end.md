@@ -22,3 +22,5 @@
 - Tests: 9 ticket tests passed; full suite 177 passed; `ruff check` and `ruff format --check` clean.
 - Manual acceptance on the real two-block preview: 39 segments reused from polished chunk0001; chunk0002 was skipped (36 source paragraphs vs 35 translated) and its 36 segments were retranslated and polished live; 75 logical blocks rendered (1 heading + 74 paragraphs), HTML had 74 text paragraphs, zero untranslated targets and no English residue.
 - Deferred/risks: equal-count legacy chunks with an internal merge/split can still be positionally misaligned because legacy chunks have no per-segment hash metadata; long segments split into new part hashes are retranslated rather than reusing the legacy full-paragraph target; glossary/neighbour context injection is not wired into the preview batch prompt; preview HTML does not use the legacy Pandoc web template.
+
+- Final review fix (`a464cbf`): preview HTML now uses `build_html` + `template.html`; translated rendering reuses `segment_state`; preview prompts inject glossary terms and neighbour context; stale state archives under `<book>/archive/<timestamp>/chapters/`.

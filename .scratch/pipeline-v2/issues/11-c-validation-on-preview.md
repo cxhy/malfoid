@@ -36,3 +36,5 @@
 - Deferred: the unresolved term-drift candidate needs human adjudication; evidence focus
   terms are still derived by the ticket 09 layer, so a candidate that cites two distant
   positions may not pull the second position into its bounded evidence set.
+
+- Final review fix (`a464cbf`): preview review plans blocks over the whole book with global review indices and maps issues back to chapter/local positions, matching ADR-0003.

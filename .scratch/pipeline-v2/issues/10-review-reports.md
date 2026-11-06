@@ -31,3 +31,5 @@
   `read_legacy_summary`.
 - Tests: 17 ticket tests passed; full suite 194 passed; ruff check/format clean.
 - Deferred: end-to-end preview review validation belongs to ticket 11.
+
+- Final review fix (`a464cbf`): `block_verdict` matches each issue to its evidence record by segment/message/chapter identity, so a rejected record for another segment cannot pass an issue.
