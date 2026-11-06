@@ -33,7 +33,7 @@ def test_long_paragraph_splits_at_sentence_boundaries(tmp_path: Path) -> None:
         "Delta four. Echo five.",
     ]
     assert [s["index"] for s in parts] == [1, 2, 3]
-    assert parts[0]["part"] == 0
+    assert parts[0]["part_number"] == 0
     assert "cont" not in parts[0]
     assert parts[1]["cont"] is True
     assert parts[2]["cont"] is True
@@ -47,10 +47,12 @@ def test_split_parts_keep_the_logical_segment_identity(tmp_path: Path) -> None:
     segments = chapter["segments"]
     logical_hash = segment_state.source_hash(OVERSIZED)
 
-    assert [s["logical_index"] for s in segments] == [0, 1, 1, 1, 2]
-    assert segments[1]["source_hash"] == logical_hash
-    assert segments[1]["part"] == 0
-    assert all(s["parent_source_hash"] == logical_hash for s in segments[2:4])
+    assert [s["logical_index"] for s in segments[1:4]] == [1, 1, 1]
+    assert "logical_index" not in segments[0]
+    assert "logical_index" not in segments[4]
+    assert segments[1]["logical_source_hash"] == logical_hash
+    assert segments[1]["part_number"] == 0
+    assert all(s["logical_source_hash"] == logical_hash for s in segments[2:4])
     assert "".join(s["source"] for s in segments[1:4]) == OVERSIZED
 
 
@@ -86,11 +88,11 @@ def test_split_long_segment_uses_the_parent_index_and_hash() -> None:
     assert parts[0]["index"] == 3
     assert parts[1]["index"] == 4
     assert parts[2]["index"] == 5
-    assert parts[0]["source_hash"] == segment["source_hash"]
+    assert parts[0]["logical_source_hash"] == segment["source_hash"]
     assert parts[0]["logical_index"] == 3
     assert parts[1]["logical_index"] == 3
-    assert parts[1]["parent_index"] == 3
-    assert parts[1]["parent_source_hash"] == segment["source_hash"]
+    assert parts[1]["logical_index"] == 3
+    assert parts[1]["logical_source_hash"] == segment["source_hash"]
     assert parts[1]["cont"] is True
     assert parts[2]["cont"] is True
 
@@ -135,7 +137,7 @@ def test_default_budget_splits_an_oversized_paragraph(tmp_path: Path) -> None:
         segment_state.estimate_tokens(s["source"]) <= segment_state.DEFAULT_SEGMENT_TOKEN_BUDGET
         for s in segments
     )
-    assert segments[0]["source_hash"] == segment_state.source_hash(paragraph)
+    assert segments[0]["logical_source_hash"] == segment_state.source_hash(paragraph)
     assert segment_state.render_markdown(chapter) == paragraph
 
 

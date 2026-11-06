@@ -21,12 +21,14 @@ from pathlib import Path
 
 import book_state
 import segment_state
+from model_client import ask_text
 
 PRESCAN_DIR = "prescan"
 DIGESTS_DIR = "digests"
 STYLE_BRIEF_FILE = "style_brief.md"
-SYNOPSIS_FILE = "synopsis.md"
+SYNOPSIS_FILE = "book_synopsis.md"
 STORY_BIBLE_FILE = "story_bible.md"
+CHAPTER_DIGESTS_DIR = "chapter_digests"
 
 DEFAULT_WORKERS = 2
 
@@ -67,6 +69,10 @@ def digest_cache_path(book_dir: Path, source_hash: str) -> Path:
     return digests_dir(book_dir) / f"{source_hash}.md"
 
 
+def chapter_digest_path(book_dir: Path, number: int) -> Path:
+    return prescan_dir(book_dir) / CHAPTER_DIGESTS_DIR / f"ch-{number:02d}.md"
+
+
 def style_brief_path(book_dir: Path) -> Path:
     return prescan_dir(book_dir) / STYLE_BRIEF_FILE
 
@@ -103,6 +109,8 @@ def book_source_ready(book_dir: Path) -> bool:
     have no state file, is not ready for prescan.
     """
     meta = _read_meta(book_dir)
+    if meta.get("source_complete") is not True:
+        return False
     numbers = _meta_chapter_numbers(meta)
     if not numbers:
         return False
@@ -136,7 +144,7 @@ def _require_ready(book_dir: Path) -> None:
 
 
 def chapter_source_text(chapter: dict) -> str:
-    return "\n\n".join(segment.get("source") or "" for segment in chapter.get("segments") or [])
+    return segment_state.chapter_text(chapter)
 
 
 def chapter_source_hash(chapter: dict) -> str:
@@ -169,6 +177,9 @@ def plan_digests(book_dir: Path) -> list[dict]:
                 "source_hash": source_hash,
                 "source_text": chapter_source_text(chapter),
                 "cache_path": cache_path,
+                "chapter_path": chapter_digest_path(
+                    book_dir, int(chapter.get("chapter") or number)
+                ),
                 "cached": _cached_digest(cache_path) is not None,
             }
         )
@@ -176,18 +187,10 @@ def plan_digests(book_dir: Path) -> list[dict]:
 
 
 def _ask(client: object, prompt: str) -> str:
-    """Call a callable client or an object exposing ``complete(prompt)``."""
-    if callable(client):
-        text = client(prompt)
-    else:
-        complete = getattr(client, "complete", None)
-        if not callable(complete):
-            raise TypeError("model client must be callable or expose complete(prompt)")
-        text = complete(prompt)
-    text = str(text).strip()
-    if not text:
-        raise PrescanError("model client returned empty text")
-    return text
+    try:
+        return ask_text(client, prompt)
+    except ValueError as exc:
+        raise PrescanError(str(exc)) from None
 
 
 def _digest_prompt(entry: dict) -> str:
@@ -207,6 +210,10 @@ def _generate_digest(client: object, entry: dict) -> tuple[str, str]:
     cache_path = entry["cache_path"]
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(digest + "\n", encoding="utf-8")
+    chapter_path = entry.get("chapter_path")
+    if chapter_path is not None:
+        chapter_path.parent.mkdir(parents=True, exist_ok=True)
+        chapter_path.write_text(digest + "\n", encoding="utf-8")
     return entry["source_hash"], digest
 
 
@@ -221,6 +228,10 @@ def run_digests(book_dir: Path, client: object, workers: int = DEFAULT_WORKERS) 
         if entry["cached"]:
             entry["digest"] = _cached_digest(entry["cache_path"]) or ""
             entry["generated"] = False
+            chapter_path = entry.get("chapter_path")
+            if chapter_path is not None:
+                chapter_path.parent.mkdir(parents=True, exist_ok=True)
+                chapter_path.write_text(entry["digest"] + "\n", encoding="utf-8")
         elif entry["source_hash"] not in pending:
             pending[entry["source_hash"]] = entry
 
@@ -307,6 +318,10 @@ def run_prescan(
         synopsis=_write_artifact(synopsis_path(book_dir), f"Synopsis: {title}", synopsis),
         story_bible=_write_artifact(story_bible_path(book_dir), f"Story bible: {title}", bible),
     )
+    if series_root is None:
+        candidate = book_dir.parent.parent
+        if book_state.is_series_root(candidate):
+            series_root = candidate
     if series_root is not None:
         result = replace(result, series_bible=merge_story_bible(series_root, book_dir))
     return result

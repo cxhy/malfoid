@@ -5,8 +5,9 @@ lines separate paragraphs; single internal newlines stay inside a paragraph. Cha
 state lives in one JSON document per chapter; Markdown is rendered from that state.
 
 Text segments larger than the per-segment budget are split at sentence boundaries.
-The first part keeps the logical source hash; continuation parts are marked ``cont``
-and rendered back into a single paragraph.
+Each part keeps its own source hash; all parts carry the logical source hash and
+logical index, and continuation parts are marked ``cont`` and rendered back into a
+single paragraph.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ import hashlib
 import json
 import re
 from pathlib import Path
+
+from token_budget import estimate_tokens
 
 CHAPTERS_DIR = "chapters"
 DEFAULT_SEGMENT_TOKEN_BUDGET = 800
@@ -37,16 +40,6 @@ def _parse_heading(line: str) -> tuple[int, str] | None:
     if m:
         return 1, m.group(1).strip()
     return None
-
-
-def estimate_tokens(text: str) -> int:
-    """Estimate model tokens as ``ceil(len(text) / 4)``.
-
-    This is the deliberate, deterministic estimator behind the per-segment budget:
-    one token per four characters, whitespace included. It is a rough English
-    heuristic rather than a tokenizer, but it is stable and testable offline.
-    """
-    return (len(text) + 3) // 4
 
 
 def _is_sentence_end(text: str, match: re.Match[str]) -> bool:
@@ -102,10 +95,9 @@ def split_long_segment(
 
     Heading segments, segments within the budget and existing continuation parts
     are returned unchanged. A single sentence longer than the budget has no
-    sentence boundary to split at, so it stays whole. The first part keeps the
-    logical source hash; continuation parts are marked ``cont`` and reference the
-    parent logical identity through ``logical_index``, ``parent_index`` and
-    ``parent_source_hash``.
+    sentence boundary to split at, so it stays whole. Each part has its own source
+    hash; all parts carry ``logical_source_hash`` and ``logical_index``, and
+    continuation parts are marked ``cont``.
     """
     text = segment.get("source") or ""
     if segment.get("kind") != "text" or segment.get("cont"):
@@ -116,7 +108,9 @@ def split_long_segment(
     if len(parts_text) <= 1:
         return [segment]
 
-    logical_hash = segment.get("source_hash") or source_hash(text)
+    logical_hash = (
+        segment.get("logical_source_hash") or segment.get("source_hash") or source_hash(text)
+    )
     logical_index = int(segment.get("logical_index", segment.get("index", 0)))
     parts: list[dict] = []
     for number, part_text in enumerate(parts_text):
@@ -124,37 +118,33 @@ def split_long_segment(
             "index": int(segment.get("index", 0)) + number,
             "kind": "text",
             "source": part_text,
-            "source_hash": logical_hash if number == 0 else source_hash(part_text),
+            "source_hash": source_hash(part_text),
             "target": segment.get("target") if number == 0 else None,
             "logical_index": logical_index,
-            "part": number,
+            "logical_source_hash": logical_hash,
+            "part_number": number,
         }
         if number > 0:
             part["cont"] = True
-            part["parent_index"] = logical_index
-            part["parent_source_hash"] = logical_hash
         parts.append(part)
     return parts
-
-
-def _exceeds_budget(segment: dict, max_segment_tokens: int) -> bool:
-    """Return whether a text segment needs splitting at the given budget."""
-    if segment.get("kind") != "text" or segment.get("cont"):
-        return False
-    return estimate_tokens(segment.get("source") or "") > max_segment_tokens
 
 
 def split_segments(
     segments: list[dict], max_segment_tokens: int = DEFAULT_SEGMENT_TOKEN_BUDGET
 ) -> list[dict]:
-    """Apply the per-segment budget and reindex parts sequentially."""
+    """Apply the per-segment budget, preserving unsplit segment shape."""
     result: list[dict] = []
     for segment in segments:
-        logical_index = int(segment.get("logical_index", segment.get("index", len(result))))
-        for part in split_long_segment(segment, max_segment_tokens):
+        parts = split_long_segment(segment, max_segment_tokens)
+        if len(parts) == 1:
+            part = dict(parts[0])
+            part["index"] = len(result)
+            result.append(part)
+            continue
+        for part in parts:
             part = dict(part)
             part["index"] = len(result)
-            part["logical_index"] = logical_index
             result.append(part)
     return result
 
@@ -186,10 +176,7 @@ def parse_source(
     fallback_title: str = "untitled",
     max_segment_tokens: int | None = DEFAULT_SEGMENT_TOKEN_BUDGET,
 ) -> list[dict]:
-    """Parse plain text or Markdown into chapters of segments.
-
-    Set ``max_segment_tokens`` to ``None`` to disable long-segment splitting.
-    """
+    """Parse plain text or Markdown into chapters of segments."""
     lines = text.splitlines()
     chapters: list[dict] = []
     current: dict | None = None
@@ -230,8 +217,7 @@ def parse_source(
         start_chapter(fallback_title, None)
     if max_segment_tokens is not None:
         for chapter in chapters:
-            if any(_exceeds_budget(segment, max_segment_tokens) for segment in chapter["segments"]):
-                chapter["segments"] = split_segments(chapter["segments"], max_segment_tokens)
+            chapter["segments"] = split_segments(chapter["segments"], max_segment_tokens)
     return chapters
 
 
@@ -255,47 +241,39 @@ def load_chapter(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def render_markdown(chapter: dict) -> str:
-    """Render source segments, merging continuation parts into one paragraph."""
-    blocks: list[str] = []
-    paragraph: str | None = None
-
-    def flush() -> None:
-        nonlocal paragraph
-        if paragraph is not None:
-            blocks.append(paragraph)
-            paragraph = None
-
+def logical_blocks(chapter: dict) -> list[dict]:
+    """Collapse continuation parts into logical blocks (heading or text)."""
+    blocks: list[dict] = []
     for segment in chapter.get("segments") or []:
         text = segment.get("source") or ""
-        if segment.get("kind") == "heading":
-            flush()
-            level = int(segment.get("level") or chapter.get("heading_level") or 1)
-            blocks.append(f"{'#' * level} {text}")
-        elif segment.get("cont"):
-            paragraph = text if paragraph is None else paragraph + text
+        if segment.get("cont") and blocks and blocks[-1]["kind"] == "text":
+            blocks[-1]["text"] += text
         else:
-            flush()
-            paragraph = text
-    flush()
-    return "\n\n".join(blocks)
-
-
-def _logical_segments(chapter: dict) -> list[tuple]:
-    """Collapse continuation parts into logical segments for comparison."""
-    merged: list[dict] = []
-    for segment in chapter.get("segments") or []:
-        if segment.get("cont") and merged:
-            merged[-1]["source"] += segment.get("source") or ""
-        else:
-            merged.append(
+            blocks.append(
                 {
                     "kind": segment.get("kind"),
                     "level": segment.get("level"),
-                    "source": segment.get("source") or "",
+                    "text": text,
                 }
             )
-    return [(s["kind"], s["level"], s["source"]) for s in merged]
+    return blocks
+
+
+def render_markdown(chapter: dict) -> str:
+    """Render source blocks, merging continuation parts into one paragraph."""
+    parts: list[str] = []
+    for block in logical_blocks(chapter):
+        if block["kind"] == "heading":
+            level = int(block.get("level") or chapter.get("heading_level") or 1)
+            parts.append(f"{'#' * level} {block['text']}")
+        else:
+            parts.append(block["text"])
+    return "\n\n".join(parts)
+
+
+def chapter_text(chapter: dict) -> str:
+    """Join logical blocks into plain text for digests, hashes and meta records."""
+    return "\n\n".join(block["text"] for block in logical_blocks(chapter))
 
 
 def verify_round_trip(
@@ -309,7 +287,9 @@ def verify_round_trip(
     got = parsed[0]
     if got.get("title") != chapter.get("title"):
         return False
-    return _logical_segments(chapter) == _logical_segments(got)
+    left = [(b["kind"], b["level"], b["text"]) for b in logical_blocks(chapter)]
+    right = [(b["kind"], b["level"], b["text"]) for b in logical_blocks(got)]
+    return left == right
 
 
 def _chapter_sort_key(path: Path) -> int:
@@ -324,25 +304,8 @@ def render_book(book_dir: Path) -> str:
     return "\n\n".join(render_markdown(chapter) for chapter in chapters)
 
 
-def _chapter_text(chapter: dict) -> str:
-    """Join segment sources, keeping continuation parts in their paragraph."""
-    blocks: list[str] = []
-    paragraph: str | None = None
-    for segment in chapter.get("segments") or []:
-        text = segment.get("source") or ""
-        if segment.get("cont") and paragraph is not None:
-            paragraph += text
-        else:
-            if paragraph is not None:
-                blocks.append(paragraph)
-            paragraph = text
-    if paragraph is not None:
-        blocks.append(paragraph)
-    return "\n\n".join(blocks)
-
-
 def _chapter_record(chapter: dict) -> dict:
-    text = _chapter_text(chapter)
+    text = chapter_text(chapter)
     return {
         "index": int(chapter.get("chapter") or 0),
         "title": chapter.get("title") or "",

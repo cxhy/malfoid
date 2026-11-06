@@ -1,7 +1,8 @@
 """Translation batch protocol (pipeline v2, ticket 04).
 
-Batches are packed by an explicit token/character budget, sent as a numbered JSON
-array request, validated for count, completeness and non-empty content, retried on
+Batches are packed by an explicit token budget, sent as a numbered request that
+must return ``{"complete": true, "targets": [...]}`` with exactly one target per
+segment, validated for count, completeness and non-empty content, retried on
 protocol failure, and finally recovered with one call per segment. Every segment
 ends with a target or a recorded failure, and results are written back by segment
 identity without reordering state.
@@ -10,43 +11,29 @@ identity without reordering state.
 from __future__ import annotations
 
 import json
-import math
 import re
-from typing import Any, Callable
+from typing import Any
+
+from model_client import call_client
+from token_budget import estimate_tokens
 
 DEFAULT_BATCH_BUDGET = 2000
 MAX_PROTOCOL_RETRIES = 2
-
-Measure = Callable[[str], int]
 
 
 class ProtocolError(ValueError):
     """Raised when model output does not satisfy the batch protocol."""
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate model tokens without a tokenizer.
-
-    Non-ASCII characters (CJK and punctuation) count as one token each; ASCII
-    characters count as one token per four characters, rounded up.
-    """
-    if not text:
-        return 0
-    ascii_chars = sum(1 for char in text if ord(char) < 128)
-    other_chars = len(text) - ascii_chars
-    return math.ceil(ascii_chars / 4) + other_chars
-
-
 def plan_batch(
     segments: list[dict[str, Any]],
     budget: int,
-    measure: Measure | None = None,
+    measure=None,
 ) -> list[list[dict[str, Any]]]:
     """Pack segments into batches that never exceed the budget.
 
-    The budget is expressed in units returned by ``measure`` (tokens by default).
-    Segment order is preserved. A single segment larger than the budget is rejected
-    here; splitting oversized segments belongs to the long-segment ticket.
+    A single segment larger than the budget is rejected here; splitting oversized
+    segments belongs to the long-segment ticket.
     """
     if budget <= 0:
         raise ValueError("batch budget must be positive")
@@ -72,14 +59,20 @@ def plan_batch(
     return batches
 
 
+def _protocol_preamble(count: int) -> list[str]:
+    return [
+        f"Return a JSON object with exactly two keys: complete (true) and targets "
+        f"(an array of exactly {count} strings, one target per segment, in order).",
+        "Do not add commentary, explanations, extra items or empty strings.",
+        "",
+    ]
+
+
 def build_batch_prompt(segments: list[dict[str, Any]]) -> str:
     """Build a numbered batch request for exactly one target per segment."""
     lines = [
         "Translate each numbered source segment into Simplified Chinese.",
-        f"Return a JSON array of exactly {len(segments)} strings, one target per segment, "
-        "in the same order.",
-        "Do not add commentary, explanations, extra items or empty strings.",
-        "",
+        *_protocol_preamble(len(segments)),
     ]
     for segment in segments:
         lines.append(f"[{segment.get('index')}] {segment.get('source') or ''}")
@@ -88,25 +81,12 @@ def build_batch_prompt(segments: list[dict[str, Any]]) -> str:
 
 def build_single_prompt(segment: dict[str, Any]) -> str:
     """Build a one-segment request for the fallback path."""
-    return "\n".join(
-        [
-            "Translate the source segment into Simplified Chinese.",
-            "Return a JSON array of exactly 1 string containing the target.",
-            "Do not add commentary, explanations, extra items or empty strings.",
-            "",
-            f"[{segment.get('index')}] {segment.get('source') or ''}",
-        ]
-    )
-
-
-def _call_client(client: Any, prompt: str) -> Any:
-    """Invoke a callable client or an object exposing ``complete(prompt)``."""
-    if callable(client):
-        return client(prompt)
-    complete = getattr(client, "complete", None)
-    if callable(complete):
-        return complete(prompt)
-    raise TypeError("client must be callable or expose complete(prompt)")
+    lines = [
+        "Translate the source segment into Simplified Chinese.",
+        *_protocol_preamble(1),
+    ]
+    lines.append(f"[{segment.get('index')}] {segment.get('source') or ''}")
+    return "\n".join(lines)
 
 
 def _parse_payload(text: Any) -> Any:
@@ -129,16 +109,13 @@ def _parse_payload(text: Any) -> Any:
 
 
 def _extract_targets(text: Any, expected: int) -> list[str]:
-    """Validate the equal-length JSON array contract and return clean targets."""
+    """Validate the completeness/count/non-empty contract and return clean targets."""
     payload = _parse_payload(text)
-    if isinstance(payload, dict):
-        if payload.get("complete") is not True:
-            raise ProtocolError("model output is marked incomplete")
-        targets = payload.get("targets")
-    elif isinstance(payload, list):
-        targets = payload
-    else:
-        raise ProtocolError("model output is not a JSON array")
+    if not isinstance(payload, dict):
+        raise ProtocolError("model output must be a JSON object")
+    if payload.get("complete") is not True:
+        raise ProtocolError("model output is marked incomplete")
+    targets = payload.get("targets")
     if not isinstance(targets, list):
         raise ProtocolError("model output targets are not a JSON array")
     if len(targets) != expected:
@@ -175,35 +152,66 @@ def _error_text(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _fallback(client: Any, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results = []
+    for segment in segments:
+        try:
+            targets = _extract_targets(call_client(client, build_single_prompt(segment)), 1)
+        except Exception as exc:
+            results.append(
+                _result(
+                    segment,
+                    target=None,
+                    error=_error_text(exc),
+                    attempts=1,
+                    stage="fallback",
+                )
+            )
+        else:
+            results.append(
+                _result(
+                    segment,
+                    target=targets[0],
+                    error=None,
+                    attempts=1,
+                    stage="fallback",
+                )
+            )
+    return results
+
+
 def translate_batch(
     client: Any,
     segments: list[dict[str, Any]],
     *,
     budget: int = DEFAULT_BATCH_BUDGET,
-    measure: Measure | None = None,
+    measure=None,
     max_retries: int = MAX_PROTOCOL_RETRIES,
 ) -> list[dict[str, Any]]:
-    """Translate segments with an equal-length batch protocol.
+    """Translate segments with an equal-length completeness contract.
 
-    Each batch is attempted once plus up to ``max_retries`` additional attempts on
-    protocol failure. If all attempts fail, every segment in the batch gets one
-    fallback call. The returned list follows input order and contains one result per
-    segment, with either a target or a recorded error.
+    Protocol failures are retried up to ``max_retries`` additional times. If the
+    batch cannot be planned or all attempts fail, every segment gets one fallback
+    call. The returned list follows input order and contains one result per segment.
     """
     segments = list(segments)
     if not segments:
         return []
+    try:
+        batches = plan_batch(segments, budget, measure)
+    except ValueError:
+        return _fallback(client, segments)
 
     results: list[dict[str, Any]] = []
-    for batch in plan_batch(segments, budget, measure):
+    for batch in batches:
         attempts = 0
         for _ in range(max_retries + 1):
             attempts += 1
             try:
                 targets = _extract_targets(
-                    _call_client(client, build_batch_prompt(batch)), len(batch)
+                    call_client(client, build_batch_prompt(batch)), len(batch)
                 )
-            except Exception:
+            except ProtocolError:
                 continue
             for segment, target in zip(batch, targets):
                 results.append(
@@ -211,31 +219,7 @@ def translate_batch(
                 )
             break
         else:
-            for segment in batch:
-                try:
-                    targets = _extract_targets(
-                        _call_client(client, build_single_prompt(segment)), 1
-                    )
-                except Exception as exc:
-                    results.append(
-                        _result(
-                            segment,
-                            target=None,
-                            error=_error_text(exc),
-                            attempts=1,
-                            stage="fallback",
-                        )
-                    )
-                else:
-                    results.append(
-                        _result(
-                            segment,
-                            target=targets[0],
-                            error=None,
-                            attempts=1,
-                            stage="fallback",
-                        )
-                    )
+            results.extend(_fallback(client, batch))
 
     return results
 
@@ -243,20 +227,16 @@ def translate_batch(
 def apply_targets(chapter: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, int]:
     """Write targets back to chapter segments by identity.
 
-    Matching uses the segment index, and the source hash when the result carries
-    one. A stale hash or an unknown index is skipped; a result without a non-empty
-    target counts as a failure. Segment order is never changed.
+    Identity is segment index plus source hash; a result without both is skipped.
+    Segment order is never changed.
     """
     segments = chapter.get("segments") or []
     by_index = {segment.get("index"): segment for segment in segments}
     applied = failed = skipped = 0
     for result in results:
         segment = by_index.get(result.get("index"))
-        if segment is None:
-            skipped += 1
-            continue
         expected = result.get("source_hash")
-        if expected and expected != segment.get("source_hash"):
+        if segment is None or not expected or expected != segment.get("source_hash"):
             skipped += 1
             continue
         target = result.get("target")

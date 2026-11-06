@@ -47,12 +47,12 @@ class ObjectClient:
         return self.response
 
 
-def _array(*targets: str) -> str:
-    return json.dumps(list(targets), ensure_ascii=False)
+def _payload(*targets: str, complete: bool = True) -> str:
+    return json.dumps({"complete": complete, "targets": list(targets)}, ensure_ascii=False)
 
 
 def _single(target: str) -> str:
-    return _array(target)
+    return _payload(target)
 
 
 def test_plan_batch_packs_within_the_budget() -> None:
@@ -76,7 +76,7 @@ def test_plan_batch_rejects_an_oversized_segment() -> None:
 
 def test_translate_batch_success_returns_one_target_per_segment() -> None:
     segments = [_segment(0, "One."), _segment(1, "Two."), _segment(2, "Three.")]
-    client = SequenceClient([_array("一", "二", "三")])
+    client = SequenceClient([_payload("一", "二", "三")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert [r["target"] for r in results] == ["一", "二", "三"]
     assert [r["error"] for r in results] == [None, None, None]
@@ -85,7 +85,7 @@ def test_translate_batch_success_returns_one_target_per_segment() -> None:
 
 def test_translate_batch_accepts_an_object_client() -> None:
     segments = [_segment(0, "One.")]
-    client = ObjectClient(_array("一"))
+    client = ObjectClient(_payload("一"))
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert results[0]["target"] == "一"
     assert len(client.prompts) == 1
@@ -93,7 +93,7 @@ def test_translate_batch_accepts_an_object_client() -> None:
 
 def test_translate_batch_retries_a_wrong_count_then_succeeds() -> None:
     segments = [_segment(0, "One."), _segment(1, "Two."), _segment(2, "Three.")]
-    client = SequenceClient([_array("一", "二"), _array("一", "二", "三")])
+    client = SequenceClient([_payload("一", "二"), _payload("一", "二", "三")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert [r["target"] for r in results] == ["一", "二", "三"]
     assert len(client.prompts) == 2
@@ -111,7 +111,7 @@ def test_translate_batch_retries_incomplete_output_then_falls_back() -> None:
 
 def test_translate_batch_rejects_empty_targets_and_falls_back() -> None:
     segments = [_segment(0, "One."), _segment(1, "Two."), _segment(2, "Three.")]
-    empty = _array("一", "", "三")
+    empty = _payload("一", "", "三")
     client = SequenceClient([empty, empty, empty, _single("一"), _single("二"), _single("三")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert [r["target"] for r in results] == ["一", "二", "三"]
@@ -120,7 +120,7 @@ def test_translate_batch_rejects_empty_targets_and_falls_back() -> None:
 
 def test_translate_batch_falls_back_to_one_call_per_segment() -> None:
     segments = [_segment(0, "One."), _segment(1, "Two."), _segment(2, "Three.")]
-    wrong = _array("一", "二")
+    wrong = _payload("一", "二")
     client = SequenceClient([wrong, wrong, wrong, _single("一"), _single("二"), _single("三")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert [r["target"] for r in results] == ["一", "二", "三"]
@@ -129,8 +129,8 @@ def test_translate_batch_falls_back_to_one_call_per_segment() -> None:
 
 def test_translate_batch_records_failures_without_dropping_segments() -> None:
     segments = [_segment(0, "One."), _segment(1, "Two."), _segment(2, "Three.")]
-    wrong = _array("一", "二")
-    client = SequenceClient([wrong, wrong, wrong, _single("一"), _array(""), _single("三")])
+    wrong = _payload("一", "二")
+    client = SequenceClient([wrong, wrong, wrong, _single("一"), _payload(""), _single("三")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert [r["index"] for r in results] == [0, 1, 2]
     assert [r["target"] for r in results] == ["一", None, "三"]
@@ -139,17 +139,33 @@ def test_translate_batch_records_failures_without_dropping_segments() -> None:
     assert results[2]["error"] is None
 
 
-def test_translate_batch_retries_client_errors() -> None:
+def test_translate_batch_propagates_client_errors() -> None:
     segments = [_segment(0, "One.")]
-    client = SequenceClient([RuntimeError("boom"), _array("一")])
+    client = SequenceClient([RuntimeError("boom")])
+    with pytest.raises(RuntimeError, match="boom"):
+        batch_translate.translate_batch(client, segments, budget=2000)
+
+
+def test_translate_batch_rejects_a_bare_array() -> None:
+    segments = [_segment(0, "One.")]
+    client = SequenceClient([json.dumps(["一"]), _payload("一")])
     results = batch_translate.translate_batch(client, segments, budget=2000)
     assert results[0]["target"] == "一"
     assert len(client.prompts) == 2
 
 
+def test_translate_batch_falls_back_when_a_batch_cannot_be_planned() -> None:
+    segments = [_segment(0, "x" * 3000)]
+    client = SequenceClient([_payload("一")])
+    results = batch_translate.translate_batch(client, segments, budget=10, measure=len)
+    assert [r["target"] for r in results] == ["一"]
+    assert results[0]["stage"] == "fallback"
+    assert len(client.prompts) == 1
+
+
 def test_translate_batch_packs_multiple_batches_by_budget() -> None:
     segments = [_segment(0, "x" * 4), _segment(1, "y" * 4), _segment(2, "z" * 4)]
-    client = SequenceClient([_array("一", "二"), _array("三")])
+    client = SequenceClient([_payload("一", "二"), _payload("三")])
     results = batch_translate.translate_batch(client, segments, budget=8, measure=len)
     assert [r["target"] for r in results] == ["一", "二", "三"]
     assert len(client.prompts) == 2
@@ -191,3 +207,10 @@ def test_apply_targets_skips_stale_hashes_and_records_failures() -> None:
     assert chapter["segments"][0]["target"] is None
     assert chapter["segments"][1]["target"] == "旧译"
     assert stats == {"applied": 0, "failed": 1, "skipped": 1}
+
+
+def test_apply_targets_skips_a_result_without_source_hash() -> None:
+    chapter = {"chapter": 1, "segments": [_segment(0, "One.")]}
+    stats = batch_translate.apply_targets(chapter, [{"index": 0, "target": "一"}])
+    assert chapter["segments"][0]["target"] is None
+    assert stats == {"applied": 0, "failed": 0, "skipped": 1}

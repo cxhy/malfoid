@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
@@ -55,6 +56,10 @@ def _ingest(book: Path, tmp_path: Path, source: str = SOURCE) -> None:
     path = tmp_path / f"{book.name}-source.md"
     path.write_text(source, encoding="utf-8")
     segment_state.ingest_source(book, path)
+    meta_path = book / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["source_complete"] = True
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
 def _chapter_title(prompt: str) -> str:
@@ -200,6 +205,7 @@ def test_run_prescan_writes_all_book_artifacts(tmp_path: Path) -> None:
     assert [entry["chapter"] for entry in result.digests] == [1, 2]
     for entry in result.digests:
         assert entry["cache_path"].is_file()
+        assert entry["chapter_path"].is_file()
     assert client.digest_calls() == 2
     assert len(client.calls) == 5
 
@@ -267,3 +273,12 @@ def test_worker_count_must_be_positive(tmp_path: Path) -> None:
     _ingest(book, tmp_path)
     with pytest.raises(ValueError):
         prescan_book.run_digests(book, FakeClient(), workers=0)
+
+
+def test_run_prescan_infers_the_series_root_and_merges(tmp_path: Path) -> None:
+    root = _series(tmp_path)
+    book = book_state.resolve_book(root, 1)
+    _ingest(book, tmp_path)
+    result = prescan_book.run_prescan(book, FakeClient())
+    assert result.series_bible == root / book_state.SERIES_BIBLE
+    assert "STORY BIBLE BODY" in result.series_bible.read_text(encoding="utf-8")
