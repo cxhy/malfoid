@@ -4,12 +4,19 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Blocks pack contiguous 段 to roughly three translation batches of tokens.
-- [ ] Blocks run in parallel with a configurable worker count (default 2).
-- [ ] Review output is structured JSON with issues, a reviewed segment count and a completeness flag.
-- [ ] Output with a wrong reviewed count, missing completeness or malformed shape is rejected.
-- [ ] Invalid output triggers bisection; bisection is bounded and does not become an exponential ladder.
-- [ ] Per-segment retries inside a block are bounded.
-- [ ] Offline tests use a fake model client to cover block planning, valid output, wrong count and bisection.
+- [x] Blocks pack contiguous 段 to roughly three translation batches of tokens.
+- [x] Blocks run in parallel with a configurable worker count (default 2).
+- [x] Review output is structured JSON with issues, a reviewed segment count and a completeness flag.
+- [x] Output with a wrong reviewed count, missing completeness or malformed shape is rejected.
+- [x] Invalid output triggers bisection; bisection is bounded and does not become an exponential ladder.
+- [x] Per-segment retries inside a block are bounded.
+- [x] Offline tests use a fake model client to cover block planning, valid output, wrong count and bisection.
+
+## Comments
+
+- Implemented in `tools/review_blocks.py`, tested in `tests/test_review_blocks.py`.
+- Public seam: `plan_blocks`, `validate_review_output`, `build_review_prompt`, `review_block`, `run_review`, `ReviewProtocolError`.
+- Tests: 24 ticket tests passed; full suite 116 passed; ruff check/format clean.
+- Deferred: evidence verification and conflict arbitration belong to ticket 09; review report artifacts and PASS/FAIL summaries belong to ticket 10.
