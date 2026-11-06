@@ -19,10 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import term_filter  # noqa: E402
 from polish_chunk import check  # noqa: E402
 from proofread_chunk import call, clean, load_config  # noqa: E402
 
@@ -32,12 +34,28 @@ SYSTEM = (
 )
 
 RULES = """修复要求：
-1. 只处理校对报告里明确认定为问题的条目；报告里写着“可保留”“无需改”“无误”“正确”的条目一律不动。
+1. 只处理校对报告里明确认定为问题的条目；报告里写着“可保留”“无需改”“无误”“正确”“不成立”“不列”的条目一律不动。
 2. 每条问题只做报告建议的最小改动（改几个词或一个短语），不要整段重写，不要顺带润色其他句子。
-3. 保留原有的 Markdown 结构：标题行、段落数量、段落顺序、空行位置完全不变。
-4. 保留原有的中文标点和对话引号风格；不要新增或删除段落。
-5. 人名、地名、咒语按术语表；原文明显笔误按上下文译，不要照字面硬译。
-6. 输出完整的中文润色稿全文，不要输出说明、前言、注释或代码块围栏。"""
+3. 如果报告建议与原文、术语表或上下文矛盾，跳过这一条，不要为了执行报告而改坏原文；只做你确认正确的改动。
+4. 保留原有的 Markdown 结构：标题行、段落数量、段落顺序、空行位置完全不变。
+5. 保留原有的中文标点和对话引号风格；不要新增或删除段落。
+6. 人名、地名、咒语按术语表；原文明显笔误按上下文译，不要照字面硬译。
+7. 输出完整的中文润色稿全文，不要输出说明、前言、注释或代码块围栏。"""
+
+
+ACCEPTABLE = re.compile(
+    r"无需修改|无需改|此项不成立|本条不成立|不成立|可保留|不列|删除此条|无需改动"
+)
+
+
+def filter_report(report: str) -> str:
+    """Drop report lines that the reviewer itself calls acceptable or invalid."""
+    kept = []
+    for line in report.splitlines():
+        if line.startswith("- ") and ACCEPTABLE.search(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def main() -> None:
@@ -63,13 +81,11 @@ def main() -> None:
     if not report_path.is_file():
         sys.exit(f"missing proofread report: {report_path}")
     polished = polished_path.read_text(encoding="utf-8")
-    report = report_path.read_text(encoding="utf-8")
+    report = filter_report(report_path.read_text(encoding="utf-8"))
 
     glossary = json.loads((temp / "glossary.json").read_text(encoding="utf-8"))
-    term_lines = "\n".join(
-        f"- {t['source']} → {t['target']}"
-        + (f"（别名：{', '.join(t['aliases'])}）" if t.get("aliases") else "")
-        for t in glossary["terms"]
+    term_lines = term_filter.format_terms(
+        term_filter.select_terms(glossary["terms"], src, check_target=True)
     )
 
     prompt = (

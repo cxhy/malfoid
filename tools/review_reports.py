@@ -19,12 +19,26 @@ import re
 from pathlib import Path
 from typing import Any
 
-import proofread_all
-
 REVIEW_DIR = "review"
 REPORT_VERSION = 1
 PASS = "PASS"
 FAIL = "FAIL"
+
+_LEGACY_VERDICT_RE = re.compile(r"结论[:：]\s*(PASS|FAIL)")
+
+
+def _legacy_verdict(path: Path) -> str:
+    if not path.is_file():
+        return "MISSING"
+    match = _LEGACY_VERDICT_RE.search(path.read_text(encoding="utf-8"))
+    return match.group(1) if match else "UNKNOWN"
+
+
+def _legacy_issue_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return len(re.findall(r"(?m)^- 【[^】]*】", path.read_text(encoding="utf-8")))
+
 
 _LEGACY_ROW_RE = re.compile(
     r"^\|\s*([^|]+?)\s*\|\s*(PASS|FAIL|UNKNOWN|MISSING)\s*\|\s*(\d+)\s*\|",
@@ -554,12 +568,12 @@ def read_legacy_proofread(path: Path) -> dict[str, Any]:
             "raw": "",
         }
     text = path.read_text(encoding="utf-8")
-    verdict = proofread_all.verdict_of(path)
+    verdict = _legacy_verdict(path)
     return {
         "kind": "legacy-proofread",
         "path": str(path),
         "verdict": verdict,
-        "issues": proofread_all.issue_count(path),
+        "issues": _legacy_issue_count(path),
         "complete": verdict in {PASS, FAIL},
         "raw": text,
     }

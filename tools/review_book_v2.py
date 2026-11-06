@@ -216,7 +216,7 @@ class ReviewModelClient:
     """OpenAI-compatible client adapter for the local review provider."""
 
     def __init__(self, model: str, effort: str, max_tokens: int) -> None:
-        from translate_chunk import load_config
+        from model_api import load_config
 
         self.base_url, self.api_key = load_config()
         self.model = model

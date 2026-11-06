@@ -5,10 +5,13 @@ Usage:
     .venv/bin/python tools/polish_all.py works/<work> [chunk0001 ...]
 
 Runs tools/polish_chunk.py serially (the local provider serializes requests).
-Each chunk gets up to four attempts: twice whole, then split in 2 and 3 parts.
+Each chunk gets up to four attempts: whole, then split in 2, 4 and 8 parts.
 Splitting is needed because this model's reasoning tokens count toward
 max_tokens, so a long chunk can spend the whole budget thinking and return
-empty content. Polished files smaller than MIN_BYTES are treated as pending.
+empty content. Polished files smaller than MIN_BYTES are treated as pending;
+``--recheck`` also validates existing files and retries structurally broken
+ones. A failed attempt removes its output so a later resume cannot mistake a
+broken file for finished work.
 
 The original translation in work_temp/output_chunk*.md is never modified;
 polished chunks go to translation/polished/chunkXXXX.md.
@@ -17,12 +20,15 @@ polished chunks go to translation/polished/chunkXXXX.md.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = str(ROOT / ".venv/bin/python")
+import polish_chunk  # noqa: E402
+
 MIN_BYTES = 50
 
 
@@ -30,15 +36,35 @@ def is_done(path: Path) -> bool:
     return path.is_file() and path.stat().st_size >= MIN_BYTES
 
 
-def pending_chunks(work: Path) -> list[str]:
+def valid(work: Path, cid: str) -> bool:
+    """True when a polished chunk exists and passes the structural checks."""
+    dest = work / "translation" / "polished" / f"{cid}.md"
+    if not is_done(dest):
+        return False
     temp = work / "work_temp"
+    old_path = temp / f"output_{cid}.md"
+    glossary_path = temp / "glossary.json"
+    if not old_path.is_file() or not glossary_path.is_file():
+        return True
+    try:
+        terms = json.loads(glossary_path.read_text(encoding="utf-8"))["terms"]
+    except (json.JSONDecodeError, KeyError):
+        return True
+    return not polish_chunk.check(
+        old_path.read_text(encoding="utf-8"),
+        dest.read_text(encoding="utf-8"),
+        terms,
+    )
+
+
+def all_chunks(work: Path) -> list[str]:
+    temp = work / "work_temp"
+    return sorted(p.stem.removeprefix("output_") for p in temp.glob("output_chunk*.md"))
+
+
+def pending_chunks(work: Path) -> list[str]:
     polished = work / "translation" / "polished"
-    out = []
-    for p in sorted(temp.glob("output_chunk*.md")):
-        cid = p.stem.removeprefix("output_")
-        if not is_done(polished / f"{cid}.md"):
-            out.append(cid)
-    return out
+    return [cid for cid in all_chunks(work) if not is_done(polished / f"{cid}.md")]
 
 
 def polish(work: Path, cid: str, effort: str, max_tokens: int, split: int) -> tuple[bool, str]:
@@ -57,8 +83,15 @@ def polish(work: Path, cid: str, effort: str, max_tokens: int, split: int) -> tu
     proc = subprocess.run(cmd, capture_output=True, text=True)
     dest = work / "translation" / "polished" / f"{cid}.md"
     ok = proc.returncode == 0 and is_done(dest)
+    if ok and not valid(work, cid):
+        ok = False
     msg = (proc.stdout + proc.stderr).strip().replace("\n", " | ")
-    return ok, msg
+    if ok:
+        return True, msg
+    # Never leave a structurally broken output behind: a size-only resume would
+    # treat it as finished and skip it forever.
+    dest.unlink(missing_ok=True)
+    return False, msg
 
 
 def main() -> None:
@@ -78,10 +111,15 @@ def main() -> None:
     )
     ap.add_argument(
         "--attempt-ladder",
-        default="1,1,2,3",
-        help="comma-separated split counts, one per attempt (default 1,1,2,3)",
+        default="1,2,4,8",
+        help="comma-separated split counts, one per attempt (default 1,2,4,8)",
     )
     ap.add_argument("--force", action="store_true")
+    ap.add_argument(
+        "--recheck",
+        action="store_true",
+        help="validate existing polished chunks and retry structurally broken ones",
+    )
     args = ap.parse_args()
 
     work = args.work_dir
@@ -89,7 +127,16 @@ def main() -> None:
     if args.force:
         for cid in todo:
             (work / "translation" / "polished" / f"{cid}.md").unlink(missing_ok=True)
-    todo = [c for c in todo if not is_done(work / "translation" / "polished" / f"{c}.md")]
+    if args.recheck:
+        todo = args.chunks or all_chunks(work)
+        broken = []
+        for cid in todo:
+            if not valid(work, cid):
+                (work / "translation" / "polished" / f"{cid}.md").unlink(missing_ok=True)
+                broken.append(cid)
+        todo = broken
+    else:
+        todo = [c for c in todo if not is_done(work / "translation" / "polished" / f"{c}.md")]
     if not todo:
         print("nothing to polish")
         return

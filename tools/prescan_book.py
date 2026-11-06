@@ -376,3 +376,47 @@ def merge_story_bible(series_root: Path, book_dir: Path) -> Path:
         merged += "\n"
     series_path.write_text(merged, encoding="utf-8")
     return series_path
+
+
+def main() -> None:
+    import argparse
+    import os
+
+    ap = argparse.ArgumentParser(description="Run v2 per-book prescan.")
+    ap.add_argument("book_dir", type=Path)
+    ap.add_argument("--series-root", type=Path, default=None)
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    ap.add_argument(
+        "--model",
+        default=os.environ.get("MALFOID_MODEL", "DeepSeek-V4.1-Flash-1017-TensorFold-Zig"),
+    )
+    ap.add_argument("--effort", default="low")
+    ap.add_argument("--max-tokens", type=int, default=32768)
+    args = ap.parse_args()
+
+    from model_api import make_client
+
+    client = make_client(args.model, args.effort, args.max_tokens)
+    result = run_prescan(
+        args.book_dir,
+        client,
+        workers=args.workers,
+        series_root=args.series_root,
+    )
+    print(
+        json.dumps(
+            {
+                "digests": len(result.digests),
+                "style_brief": str(result.style_brief) if result.style_brief else None,
+                "synopsis": str(result.synopsis) if result.synopsis else None,
+                "story_bible": str(result.story_bible) if result.story_bible else None,
+                "series_bible": str(result.series_bible) if result.series_bible else None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -26,6 +26,15 @@ CJK = re.compile(r"[\u4e00-\u9fff]")
 URLISH = re.compile(r"(!?\[[^\]]*\]\([^)]*\)|<[^>]+>|https?://\S+)")
 # Family mottos kept in their original Latin/French with a Chinese gloss after them.
 FOREIGN_MOTTO = re.compile(r"(Toujours Pur|Radices Perdurant|Sanctimonia Vinc\w* Semper)")
+# Natural Chinese short references that still count as the canonical term.
+# They are shortened references, not different translations.
+TERM_SHORT_FORMS = {
+    "魔法部部长": ["部长"],
+    "马尔福庄园": ["庄园"],
+    "哭泣的桃金娘": ["桃金娘"],
+    "小矮星彼得": ["彼得", "虫尾巴"],
+    "戈德里克山谷": ["戈德里克山谷"],
+}
 
 
 def blocks(text: str) -> int:
@@ -93,6 +102,12 @@ def main() -> int:
                 print(f"      {line}")
             failures += 1
 
+        def acceptable_targets(target: str) -> set[str]:
+            values = {target}
+            values.update(part for part in target.split("·") if part)
+            values.update(TERM_SHORT_FORMS.get(target, []))
+            return values
+
         def covered(form: str) -> bool:
             """True when every occurrence of `form` sits inside a longer glossary term."""
             hits = [m.start() for m in re.finditer(rf"\b{re.escape(form)}\b", src)]
@@ -112,12 +127,23 @@ def main() -> int:
             forms = [term["source"], *term.get("aliases", [])]
             hit = False
             for f in forms:
-                if re.search(rf"\b{re.escape(f)}\b", src) and not covered(f):
+                for match in re.finditer(rf"\b{re.escape(f)}\b", src):
+                    if covered(f):
+                        continue
+                    # A short alias such as "Godric" is ambiguous when it is
+                    # followed by another capitalized name ("Godric Gryffindor");
+                    # that is a different entity, not this glossary term.
+                    if f != term["source"] and re.match(
+                        r"\s+[A-Z][a-z]+", src[match.end() : match.end() + 40]
+                    ):
+                        continue
                     hit = True
+                    break
+                if hit:
                     break
             if hit:
                 target = term["target"]
-                heads = {target, *[part for part in target.split("·") if part]}
+                heads = acceptable_targets(target)
                 if not any(h and h in out for h in heads):
                     missing.append(f"{term['source']}->{target}")
         if missing:

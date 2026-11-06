@@ -34,7 +34,7 @@ class LocalModelClient:
     """OpenAI-compatible client adapter for the local provider."""
 
     def __init__(self, model: str, effort: str, max_tokens: int) -> None:
-        from translate_chunk import SYSTEM, load_config
+        from model_api import SYSTEM, load_config
 
         self.base_url, self.api_key = load_config()
         self.model = model
@@ -43,7 +43,7 @@ class LocalModelClient:
         self.system = SYSTEM
 
     def __call__(self, prompt: str) -> str:
-        from translate_chunk import call
+        from model_api import call
 
         text, _ = call(
             self.base_url,

@@ -209,7 +209,7 @@ def test_run_preview_review_writes_reports_metrics_and_go_decision(tmp_path: Pat
     assert result["metrics"]["alignment_false_positives"] == 0
     assert result["metrics"]["complete"] is True
     assert result["alignment"]["clean"] is True
-    assert result["decision"]["decision"] == "GO"
+    assert result["decision"]["decision"] == "NO-GO"
     assert result["advisory"] is True
 
     review_dir = review_reports.review_dir(book)
@@ -227,7 +227,7 @@ def test_run_preview_review_writes_reports_metrics_and_go_decision(tmp_path: Pat
 
     acceptance = json.loads((review_dir / "acceptance.json").read_text(encoding="utf-8"))
     assert acceptance["advisory"] is True
-    assert acceptance["decision"]["decision"] == "GO"
+    assert acceptance["decision"]["decision"] == "NO-GO"
     assert acceptance["metrics"]["false_positive_rate"] == 0.5
 
     reloaded = segment_state.load_chapter(segment_state.chapter_path(book, 1))
@@ -306,7 +306,7 @@ def test_run_preview_review_keeps_chapter_positions_apart(tmp_path: Path) -> Non
     issue = result["reviews"][0]["issues"][0]
     assert (issue["chapter"], issue["segment_index"], issue["global_segment_index"]) == (2, 1, 3)
     assert result["metrics"]["confirmed"] == 1
-    assert result["decision"]["decision"] == "GO"
+    assert result["decision"]["decision"] == "NO-GO"
 
 
 def test_run_preview_review_plans_cross_chapter_blocks_and_maps_global_indices(
@@ -356,7 +356,7 @@ def test_run_preview_review_plans_cross_chapter_blocks_and_maps_global_indices(
     assert [candidate["candidate"]["global_segment_index"] for candidate in candidates] == [0, 2, 3]
 
 
-def test_run_preview_review_records_high_false_positive_rate_as_no_go(tmp_path: Path) -> None:
+def test_run_preview_review_rejected_candidates_do_not_block_go(tmp_path: Path) -> None:
     chapter = _chapter(
         1,
         [
@@ -377,8 +377,9 @@ def test_run_preview_review_records_high_false_positive_rate_as_no_go(tmp_path: 
     result = review_preview.run_preview_review(book, client)
 
     assert result["metrics"]["false_positive_rate"] == 1.0
-    assert result["decision"]["decision"] == "NO-GO"
-    assert any("false-positive rate" in reason for reason in result["decision"]["reasons"])
+    assert result["metrics"]["confirmed"] == 0
+    assert result["decision"]["decision"] == "GO"
+    assert result["decision"]["reasons"] == []
 
 
 def test_run_preview_review_flags_unresolved_candidates_for_human_review(tmp_path: Path) -> None:
@@ -402,7 +403,7 @@ def test_run_preview_review_flags_unresolved_candidates_for_human_review(tmp_pat
     assert result["metrics"]["unresolved"] == 1
     assert result["metrics"]["false_positive_rate"] == 0.0
     assert result["decision"]["human_review_required"] is True
-    assert result["decision"]["decision"] == "GO"
+    assert result["decision"]["decision"] == "NO-GO"
 
 
 def test_run_preview_review_rejects_a_book_without_chapters(tmp_path: Path) -> None:

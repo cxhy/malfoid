@@ -71,7 +71,7 @@ def main() -> None:
     ap.add_argument("temp_dir", type=Path)
     ap.add_argument("chunks", nargs="*")
     ap.add_argument("--workers", type=int, default=1)
-    ap.add_argument("--effort", default="medium")
+    ap.add_argument("--effort", default="low")
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()

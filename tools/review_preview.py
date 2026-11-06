@@ -36,7 +36,6 @@ import segment_state
 ACCEPTANCE_JSON = "acceptance.json"
 ACCEPTANCE_MARKDOWN = "acceptance.md"
 ACCEPTANCE_VERSION = 1
-DEFAULT_MAX_FALSE_POSITIVE_RATE = 0.5
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
@@ -236,16 +235,12 @@ def compute_metrics(
     }
 
 
-def decide_go_no_go(
-    metrics: dict[str, Any],
-    alignment: dict[str, Any],
-    *,
-    max_false_positive_rate: float = DEFAULT_MAX_FALSE_POSITIVE_RATE,
-) -> dict[str, Any]:
-    """Return the deterministic Book 1 go/no-go decision for a preview run."""
-    if not 0.0 <= max_false_positive_rate <= 1.0:
-        raise ValueError("max_false_positive_rate must be between 0 and 1")
+def decide_go_no_go(metrics: dict[str, Any], alignment: dict[str, Any]) -> dict[str, Any]:
+    """Return the deterministic Book 1 go/no-go decision for a preview run.
 
+    Rejected candidates are review false positives and do not block the decision;
+    confirmed issues, unresolved issues and alignment failures do.
+    """
     reasons: list[str] = []
     if not metrics.get("complete"):
         reasons.append("review blocks are incomplete")
@@ -253,17 +248,15 @@ def decide_go_no_go(
         reasons.append("segment alignment check failed")
     if metrics.get("untraceable_issues"):
         reasons.append("some issues do not trace to aligned source/target positions")
-    rate = float(metrics.get("false_positive_rate") or 0.0)
-    if rate > max_false_positive_rate:
-        reasons.append(
-            f"false-positive rate {rate:.2f} exceeds the threshold {max_false_positive_rate:.2f}"
-        )
+    if metrics.get("confirmed"):
+        reasons.append(f"{metrics['confirmed']} confirmed issues remain")
+    if metrics.get("unresolved"):
+        reasons.append(f"{metrics['unresolved']} issues need human review")
 
     decision = "GO" if not reasons else "NO-GO"
     return {
         "decision": decision,
         "reasons": reasons,
-        "max_false_positive_rate": max_false_positive_rate,
         "human_review_required": bool(
             metrics.get("unresolved") or metrics.get("unresolved_conflicts")
         ),
@@ -339,7 +332,6 @@ def run_preview_review(
     measure=None,
     cache_dir: Path | None = None,
     reuse_map: dict[str, dict[str, str]] | None = None,
-    max_false_positive_rate: float = DEFAULT_MAX_FALSE_POSITIVE_RATE,
 ) -> dict[str, Any]:
     """Review a migrated preview book and record the Book 1 decision.
 
@@ -377,7 +369,6 @@ def run_preview_review(
     decision = decide_go_no_go(
         metrics,
         alignment,
-        max_false_positive_rate=max_false_positive_rate,
     )
     summary = review_reports.write_review_reports(book, reviews, evidence_result=evidence)
 
@@ -414,9 +405,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--max-segment-retries", type=int, default=review_blocks.DEFAULT_SEGMENT_RETRIES
     )
-    parser.add_argument(
-        "--max-false-positive-rate", type=float, default=DEFAULT_MAX_FALSE_POSITIVE_RATE
-    )
     parser.add_argument("--cache-dir", type=Path, help="review block cache directory")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
@@ -433,7 +421,6 @@ def main(argv: list[str] | None = None) -> None:
         max_bisect_depth=args.max_bisect_depth,
         max_segment_retries=args.max_segment_retries,
         cache_dir=cache_dir,
-        max_false_positive_rate=args.max_false_positive_rate,
     )
     summary = {
         "metrics": result["metrics"],

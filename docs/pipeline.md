@@ -3,26 +3,40 @@
 Malfoid's pipeline is a sequence of scripts that read and write a **work directory**.
 Nothing is stored in a database or daemon: the directory is the state.
 
+> **v2 is the active pipeline.** v1 tools are archived under `archive/v1/tools/`
+> and are not used. The v2 section below is the current contract; the v1 stages
+> remain as historical reference.
+
 ## Work directory layout
 
+A series has one root directory; each book is a sub-work and the unit of execution
+(ADR 0001). Legacy single-book works keep the flat layout.
+
 ```text
-works/<work-id>-<slug>/
-├── meta.json                 title, author, tags, rating, chapters, source URL
-├── glossary.json             curated term table (human-editable)
-├── source/
-│   ├── original.html|pdf     the downloaded source
-│   └── work.md               chapter-aligned Markdown
-├── work_temp/                translation state (the source of truth)
-│   ├── chunk0001.md          source chunk
-│   ├── output_chunk0001.md   raw translation
-│   ├── prompt_ctx/           glossary + neighbour excerpts per chunk
-│   └── manifest.json         chunk metadata
-├── translation/
-│   ├── draft/                unpolished merged book
-│   ├── polished/             per-chunk polished text + book.md + book.html
-│   ├── proofread/            per-chunk fidelity reports + summary.md
-│   └── <Title>.md / .html    final reader-facing deliverables
-└── archive/<timestamp>/      previous source version after an incremental update
+works/<series-id>-<slug>/
+├── series.json               series title, author, book list, order, status
+├── glossary.json             series glossary master
+├── story_bible.md            series-level reference
+└── books/book-NN/            one book per sub-work
+    ├── meta.json             title, author, tags, rating, chapters, source URL
+    ├── source/
+    │   ├── original.html|pdf the downloaded source
+    │   └── work.md           chapter-aligned Markdown (v1)
+    │   └── chapters/ch-NN.json  segment state (v2)
+    ├── work_temp/            translation state (the source of truth)
+    │   ├── chunk0001.md      source chunk (v1)
+    │   ├── output_chunk0001.md  raw translation (v1)
+    │   ├── prompt_ctx/       glossary + neighbour excerpts per chunk
+    │   └── manifest.json     chunk metadata
+    ├── translation/
+    │   ├── draft/            unpolished merged book
+    │   ├── polished/         polished text + book.md + book.html
+    │   ├── proofread/        per-chunk fidelity reports (legacy)
+    │   ├── review/           structured review JSON + human summaries
+    │   └── <Title>.md / .html  final reader-facing deliverables
+    └── archive/<timestamp>/  previous source version after an incremental update
+
+works/<work-id>-<slug>/       legacy single-book work (unchanged)
 ```
 
 Content directories (`works/`, source folders) are git-ignored. Only tooling lives in
@@ -53,6 +67,30 @@ python tools/make_prompt_ctx.py works/<work>/work_temp
 Update it as new names appear, then rerun frequency counting and prompt-context
 generation so later chunks see the updated table.
 
+### 2b. Whole-book prescan (HP fanfic story bible)
+
+```bash
+python tools/build_prescan.py works/<work> --effort low
+# reuse existing chapter digests without calling the model:
+python tools/build_prescan.py works/<work> --reuse-digests
+```
+
+The prescan is the Wenyi-style book-understanding layer, specialised for Harry Potter
+fanfiction. It writes under `work_temp/prescan/`:
+
+| Artifact | Purpose |
+|---|---|
+| `chapter_digests/ch-NN.md` | per-chapter digest: plot, people, timeline, status, secrets, magic, voice, foreshadowing |
+| `style_brief.md` | narrative voice and character voices |
+| `book_synopsis.md` | translation-only whole-book arc and future facts |
+| `story_bible.md` | HP-fanfic reference: canon divergence, character registry, timeline, secrets/reveals, status |
+| `chunk_map.json` | chunk → chapter mapping |
+| `meta.json` | source hashes, profile version, model usage, cache identity |
+
+Digests are content-addressed (`cache/digest-<sha>.md`). A rerun reuses verified digests
+and only calls the model for changed chapters or changed inputs; `--force` regenerates
+everything.
+
 ### 3. Translate
 
 ```bash
@@ -61,14 +99,17 @@ python tools/translate_all.py works/<work>/work_temp --workers 1 --effort low
 python tools/translate_chunk.py works/<work>/work_temp chunk0001 --effort low
 ```
 
-Each chunk gets its own prompt: glossary table, the chunk text, and read-only excerpts
-from neighbouring chunks. Output goes to `work_temp/output_chunkXXXX.md`; the raw
+Each chunk gets its own prompt: the HP profile rules, glossary table, style brief, story
+bible, book synopsis, chapter digest, recent translated context, next-chunk lookahead and
+read-only neighbour excerpts. Output goes to `work_temp/output_chunkXXXX.md`; the raw
 translation is never overwritten by polishing.
 
 ### 4. Polish
 
 ```bash
 python tools/polish_all.py works/<work> --effort minimal
+# validate existing polished chunks and retry structurally broken ones:
+python tools/polish_all.py works/<work> --recheck --effort minimal
 ```
 
 Polishing writes `translation/polished/chunkXXXX.md` and runs structural checks:
@@ -133,6 +174,20 @@ changed chunks are marked pending. The previous `source/`, `work_temp/`, `meta.j
 `polished/`, `proofread/` and deliverables are archived under
 `works/<work>/archive/<timestamp>/`.
 
+## HP fanfic profile
+
+The active profile lives in `profiles/hp-fanfic/`: a `manifest.json` plus one Markdown
+rule file per stage (`translation`, `polish`, `proofread`, `prescan_digest`,
+`story_bible`, `book_review`). All model-calling tools compose their prompts from the
+profile, so HP-specific rules are defined once instead of copied into every script.
+
+Resolution order: `MALFOID_PROFILE` → `profile` field in `meta.json` → `hp-fanfic`.
+
+The profile fixes the female-Draco naming contract (德拉科妮娅 / 德拉 / 德拉科妮娅·马尔福,
+pronoun 她, forbidden 达西), HP official terminology policy, canon-divergence handling,
+timeline/age tracking, reveal timing, British school address conventions and spell
+conventions.
+
 ## Pipeline v2
 
 v2 keeps the same file-based contract but makes **段** the state unit. A book
@@ -194,9 +249,32 @@ All model-calling tools resolve the endpoint in this order:
 
 This keeps the pipeline portable while preserving the original local-model workflow.
 
-## Reasoning budgets
+## Reasoning budgets and overflow recovery
 
-Reasoning tokens count toward `max_tokens`. For polishing use `minimal`; `medium` or
-`high` can consume the whole budget and return empty content. For translation and
-proofreading, `low` is the usual setting. When a chunk overflows, split it rather than
-raising the budget indefinitely.
+Reasoning tokens count toward `max_tokens`. The model can spend the entire completion
+budget thinking and return empty content (`finish_reason=length`, reasoning tokens at
+the cap). The pipeline treats that as an overflow, not a valid empty translation.
+
+Recovery ladder, applied automatically:
+
+1. **Smaller prompt first.** Translation, polish and proofread send only the glossary
+   terms that occur in the current text, not the whole book glossary. This cuts prompt
+   size and unrelated reasoning.
+2. **Split before dropping reasoning.** Translation splits chunks over 6000 characters;
+   polish splits long parts and escalates up to the paragraph count (max 16); proofread
+   starts at split 4 for chunks over 4000 characters and escalates to one paragraph per
+   part; whole-book review escalates splits 1 → 2 → 4 → 8.
+3. **Disable reasoning only at the smallest unit.** When a part is a single paragraph
+   (or small enough), the tool retries with `reasoning_effort=none`. If that still
+   overflows, the tool fails loudly instead of writing an empty artifact.
+4. **Prescan digests split recursively.** A chapter part that overflows is split at
+   paragraph boundaries, each half is digested, and the digests are merged. Style,
+   synopsis and story bible generation retry with reasoning disabled; if still truncated,
+   the prescan raises instead of saving a partial artifact.
+5. **No broken artifacts count as done.** A failed polish removes the bad polished file;
+   `polish_all --recheck` validates existing polished chunks and retries broken ones. A
+   proofread report without a PASS/FAIL conclusion is removed so the chunk is retried.
+
+For polishing use `minimal`; `medium` or `high` can consume the whole budget. For
+translation and proofreading, `low` is the usual setting. Raise `--max-tokens` only after
+the split ladder, not before it.

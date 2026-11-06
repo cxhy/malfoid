@@ -84,7 +84,10 @@ def call(
     )
     with urllib.request.urlopen(req, timeout=900) as resp:
         data = json.loads(resp.read())
-    return data["choices"][0]["message"]["content"], data.get("usage", {})
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    usage["finish_reason"] = choice.get("finish_reason")
+    return choice["message"]["content"], usage
 
 
 def clean(text: str) -> str:
@@ -125,6 +128,20 @@ def build(work: Path, volumes: list[int], single: bool, effort: str, max_tokens:
             base_url, api_key, "DeepSeek-V4.1-Flash-1017-TensorFold-Zig", prompt, effort, max_tokens
         )
         out = clean(out)
+        if "主要剧情" not in out or len(out) < 300:
+            # reasoning overflow: retry without reasoning before giving up
+            retry_out, retry_usage = call(
+                base_url,
+                api_key,
+                "DeepSeek-V4.1-Flash-1017-TensorFold-Zig",
+                prompt,
+                "none",
+                max_tokens,
+            )
+            retry_out = clean(retry_out)
+            if "主要剧情" in retry_out and len(retry_out) >= 300:
+                out = retry_out
+                usage = {"primary": usage, "fallback": retry_usage}
         if "主要剧情" not in out or len(out) < 300:
             sys.exit(f"synopsis output looks invalid for {label}: {len(out)} chars")
         dest.parent.mkdir(parents=True, exist_ok=True)

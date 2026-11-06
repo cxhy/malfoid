@@ -36,7 +36,9 @@ def test_pending_chunks(tmp_path: Path) -> None:
     for cid in ("chunk0001", "chunk0002"):
         (temp / f"{cid}.md").write_text("x", encoding="utf-8")
     (temp / "output_chunk0001.md").write_text("x", encoding="utf-8")
-    (work / "translation" / "proofread" / "chunk0001.md").write_text("x", encoding="utf-8")
+    (work / "translation" / "proofread" / "chunk0001.md").write_text(
+        "## 严重\n\n无\n\n结论：PASS\n", encoding="utf-8"
+    )
     assert proofread_all.chunk_ids(work) == ["chunk0001", "chunk0002"]
     assert proofread_all.pending(work) == ["chunk0002"]
 

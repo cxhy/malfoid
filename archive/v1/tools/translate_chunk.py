@@ -20,6 +20,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+import prompt_profile
+import term_filter
+
 MODELS = Path.home() / ".pi/agent/models.json"
 PROVIDER = "deepseek-v4-1-flash"
 
@@ -33,14 +36,13 @@ RULES = """翻译要求：
 1. 只输出译文正文，不要任何说明、标题外的注释或对话式内容。
 2. 保持 Markdown 结构：原有的标题行、空行分段、斜体/加粗、链接一律保留；不要合并或拆分原文段落。
 3. 术语表里出现的专有名词必须逐字使用指定译名，包括别名形式；人名、地名、学院、咒语一律不许自行变译。
-4. 性转的马尔福（Darcy 或 Draco）是女性，代词用“她”；哈利是男性，用“他”。
+4. 人物性别与代词按原文和术语表；性转角色使用术语表指定的代词，不得按名字自行推断。
 5. 对话用中文引号“”，句末标点放在引号内；省略号用……，破折号用——；不用英文标点。
 6. 避免翻译腔：按中文叙述节奏重组句子、调整语序，允许合并短句；但不得增删情节、不得改动人物言行、因果和语气强度。
 7. 保留叙述者的语气和人物说话的口吻差异；脏话、粗鲁、幼稚的措辞照实译出，不要美化。
 8. 不要添加译者注、不要解释文化背景、不要保留英文原词（术语表没有的专有名词按通行译法音译）。
 9. 译文长度与原文大致相当，不要扩写成赏析，也不要压缩成梗概。
-10. 性转角色命名：Darcy 单独出现译作“德拉科妮娅”，Dar 这个昵称译作“德拉”，全名 Darcy Malfoy 或 Draco Malfoy 译作“德拉科妮娅·马尔福”；原文用 Draco 指女性马尔福时也译作“德拉科妮娅”；不得出现“达西”或“德拉科”。
-11. 译文中不得残留任何英文单词或短语（包括书名、咒语、专有名词），一律译成中文；Markdown 的标题符号和链接地址除外。"""
+10. 译文中不得残留任何英文单词或短语（包括书名、咒语、专有名词），一律译成中文；Markdown 的标题符号和链接地址除外。"""
 
 
 def load_config() -> tuple[str, str]:
@@ -77,7 +79,10 @@ def call(
     )
     with urllib.request.urlopen(req, timeout=300) as resp:
         data = json.loads(resp.read())
-    return data["choices"][0]["message"]["content"], data.get("usage", {})
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    usage["finish_reason"] = choice.get("finish_reason")
+    return choice["message"]["content"], usage
 
 
 def clean(text: str) -> str:
@@ -86,6 +91,18 @@ def clean(text: str) -> str:
     text = re.sub(r"\n```\s*$", "", text)
     text = re.sub(r"^(译文|翻译)[:：]\s*\n?", "", text)
     return text.strip() + "\n"
+
+
+def reasoning_overflow(usage: dict, max_tokens: int) -> bool:
+    """True when the model spent its whole completion budget on reasoning."""
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = details.get("reasoning_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    return (
+        usage.get("finish_reason") == "length"
+        or reasoning >= max_tokens * 0.95
+        or completion >= max_tokens
+    )
 
 
 def split_text(text: str) -> list[str]:
@@ -109,7 +126,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("temp_dir", type=Path)
     ap.add_argument("chunk")
-    ap.add_argument("--effort", default="medium")
+    ap.add_argument("--effort", default="low")
     ap.add_argument(
         "--model",
         default=os.environ.get("MALFOID_MODEL", "DeepSeek-V4.1-Flash-1017-TensorFold-Zig"),
@@ -121,28 +138,22 @@ def main() -> None:
     src = (temp / f"{args.chunk}.md").read_text(encoding="utf-8")
     ctx = (temp / "prompt_ctx" / f"{args.chunk}.md").read_text(encoding="utf-8")
     glossary = json.loads((temp / "glossary.json").read_text(encoding="utf-8"))
+    rules = prompt_profile.compose(RULES, "translation", work_dir=temp.parent)
 
-    terms = "\n".join(
-        f"- {t['source']} → {t['target']}"
-        + (f"（别名：{', '.join(t['aliases'])}）" if t.get("aliases") else "")
-        + (f"；{t['notes']}" if t.get("notes") else "")
-        for t in glossary["terms"]
-    )
+    terms = term_filter.format_terms(term_filter.select_terms(glossary["terms"], src))
 
-    def try_translate(text: str):
+    def try_translate(text: str, effort: str):
         prompt = (
-            f"{RULES}\n\n"
+            f"{rules}\n\n"
             f"术语表：\n{terms}\n\n"
-            f"以下是同章的术语匹配表和相邻章节的只读片段，仅供判断代词与指代，不要翻译、不要写入译文：\n{ctx}\n\n"
+            f"以下是全局预扫描、最近译文、下一块开头和相邻原文的只读上下文，仅供判断代词、称呼、语气和伏笔，不要翻译、不要写入译文：\n{ctx}\n\n"
             f"待翻译正文：\n\n{text}"
         )
         en_words = len(re.findall(r"[A-Za-z']+", text))
         min_cjk = max(12, int(en_words * 0.35))
         for attempt in range(2):
             try:
-                raw, usage = call(
-                    base_url, api_key, args.model, prompt, args.effort, args.max_tokens
-                )
+                raw, usage = call(base_url, api_key, args.model, prompt, effort, args.max_tokens)
             except Exception as e:  # timeout / HTTP error: retry the same text
                 print(f"attempt {attempt + 1} failed: {e}", flush=True)
                 time.sleep(8)
@@ -150,27 +161,55 @@ def main() -> None:
             out = clean(raw)
             if len(re.findall(r"[\u4e00-\u9fff]", out)) >= min_cjk:
                 return out
-            print(f"attempt {attempt + 1}: output too short/empty ({len(out)} chars)", flush=True)
+            if reasoning_overflow(usage, args.max_tokens):
+                print(
+                    f"attempt {attempt + 1} (effort={effort}): reasoning overflow",
+                    flush=True,
+                )
+                break
+            print(
+                f"attempt {attempt + 1} (effort={effort}): output too short/empty "
+                f"({len(out)} chars)",
+                flush=True,
+            )
             time.sleep(5)
         return None
 
-    def translate_recursive(text: str, depth: int):
-        out = try_translate(text)
+    def translate_recursive(text: str):
+        # Quality first: keep the configured effort and split smaller before
+        # dropping reasoning. Long chunks start split so later paragraphs keep
+        # the same attention budget; effort=none is only allowed for a single
+        # paragraph, the smallest unit, and only after it still overflows.
+        if len(text) > 6000:
+            parts = split_text(text)
+            if len(parts) >= 2:
+                print(
+                    f"proactively splitting {len(text)} chars into {len(parts)} parts", flush=True
+                )
+                outs = [translate_recursive(p) for p in parts]
+                if all(o is not None for o in outs):
+                    return "\n\n".join(o.strip() for o in outs) + "\n"
+                return None
+        out = try_translate(text, args.effort)
         if out is not None:
             return out
-        if depth >= 2:
+        paragraphs = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if len(paragraphs) <= 1:
+            if args.effort != "none":
+                print("last resort: single paragraph retried with effort=none", flush=True)
+                return try_translate(text, "none")
             return None
         parts = split_text(text)
         if len(parts) < 2:
             return None
-        print(f"splitting into {len(parts)} part(s) at depth {depth + 1}", flush=True)
-        outs = [translate_recursive(p, depth + 1) for p in parts]
-        if any(o is None for o in outs):
-            return None
-        return "\n\n".join(o.strip() for o in outs) + "\n"
+        print(f"splitting into {len(parts)} part(s)", flush=True)
+        outs = [translate_recursive(p) for p in parts]
+        if all(o is not None for o in outs):
+            return "\n\n".join(o.strip() for o in outs) + "\n"
+        return None
 
     base_url, api_key = load_config()
-    out = translate_recursive(src, 0)
+    out = translate_recursive(src)
     if out is None:
         sys.exit(f"{args.chunk}: translation failed")
     (temp / f"output_{args.chunk}.md").write_text(out, encoding="utf-8")

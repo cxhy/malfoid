@@ -34,7 +34,11 @@ def chunk_ids(work: Path) -> list[str]:
 
 
 def pending(work: Path) -> list[str]:
-    done = {p.stem for p in (work / "translation" / "proofread").glob("chunk*.md")}
+    done = {
+        p.stem
+        for p in (work / "translation" / "proofread").glob("chunk*.md")
+        if verdict_of(p) in ("PASS", "FAIL")
+    }
     return [cid for cid in chunk_ids(work) if cid not in done]
 
 
@@ -46,7 +50,7 @@ def verdict_of(path: Path) -> str:
 
 
 def proofread(
-    work: Path, cid: str, effort: str, source: str, force: bool = False
+    work: Path, cid: str, effort: str, source: str, force: bool = False, split: int = 1
 ) -> tuple[str, str]:
     cmd = [
         PY,
@@ -58,6 +62,8 @@ def proofread(
         "--source",
         source,
     ]
+    if split > 1:
+        cmd += ["--split", str(split)]
     if force:
         cmd.append("--force")
     proc = subprocess.run(
@@ -67,9 +73,14 @@ def proofread(
     )
     report = work / "translation" / "proofread" / f"{cid}.md"
     if proc.returncode != 0:
+        report.unlink(missing_ok=True)
         tail = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
         return cid, f"ERROR {tail[0]}"
-    return cid, verdict_of(report)
+    verdict = verdict_of(report)
+    if verdict == "UNKNOWN":
+        # A report without a conclusion is not resumable progress; retry next run.
+        report.unlink(missing_ok=True)
+    return cid, verdict
 
 
 def issue_count(path: Path) -> int:
@@ -88,6 +99,12 @@ def main() -> None:
     ap.add_argument("--effort", default="low")
     ap.add_argument("--source", choices=["auto", "polished", "draft"], default="auto")
     ap.add_argument("--force", action="store_true", help="redo chunks that already have a report")
+    ap.add_argument(
+        "--split",
+        type=int,
+        default=1,
+        help="split each chunk into N parts before proofreading (for speed and overflow)",
+    )
     ap.add_argument("--summary", help="summary file name under translation/proofread/")
     args = ap.parse_args()
 
@@ -102,7 +119,11 @@ def main() -> None:
     else:
         todo = all_ids
     if not args.force:
-        done = {p.stem for p in (work / "translation" / "proofread").glob("chunk*.md")}
+        done = {
+            p.stem
+            for p in (work / "translation" / "proofread").glob("chunk*.md")
+            if verdict_of(p) in ("PASS", "FAIL")
+        }
         todo = [c for c in todo if c not in done]
     if not todo:
         print("nothing to proofread")
@@ -112,7 +133,7 @@ def main() -> None:
     results: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(proofread, work, cid, args.effort, args.source, args.force): cid
+            pool.submit(proofread, work, cid, args.effort, args.source, args.force, args.split): cid
             for cid in todo
         }
         for n, fut in enumerate(as_completed(futures), 1):

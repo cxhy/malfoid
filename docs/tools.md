@@ -3,6 +3,10 @@
 Every tool is a standalone Python script under `tools/`. Run them with the project
 virtualenv; most accept `--help`.
 
+> **v2 is the active pipeline.** v1 tools marked archived now live under
+> `archive/v1/tools/` and are not used. Converters, `build_html.py` and
+> `export_glossary.py` remain active.
+
 ## Source conversion
 
 | Tool | Purpose |
@@ -11,15 +15,17 @@ virtualenv; most accept `--help`.
 | `fic_convert.py` | FicHub HTML export (`div#chap_N`) → same layout |
 | `pdf_convert.py` | chapter-numbered PDF → Markdown, paragraphs rebuilt from indentation |
 
-## Glossary and context
+## Glossary and context (v1; export_glossary remains active)
 
 | Tool | Purpose |
 |---|---|
-| `make_prompt_ctx.py` | per-chunk prompt context: glossary table + neighbour excerpts |
+| `build_prescan.py` | resumable chapter digests, style brief, synopsis and HP story bible |
+| `make_prompt_ctx.py` | per-chunk prompt context: style brief, story bible, synopsis, digest, glossary, rolling context, neighbour excerpts |
+| `prompt_profile.py` | load the active HP fanfic profile and its per-stage rule sections |
 | `export_glossary.py` | human-readable `glossary.md` from `glossary.json` |
 | `qa_translation.py` | residue and structure checks over translated chunks |
 
-## Translation
+## Translation (v1, archived)
 
 | Tool | Purpose |
 |---|---|
@@ -27,23 +33,24 @@ virtualenv; most accept `--help`.
 | `translate_all.py` | translate pending chunks, repair residue, retry structure failures |
 | `fix_residue.py` | rewrite only lines that still contain untranslated Latin words |
 
-## Polish
+## Polish (v1, archived)
 
 | Tool | Purpose |
 |---|---|
 | `polish_chunk.py` | light-touch polish of one chunk, with structural checks |
-| `polish_all.py` | polish pending chunks, with a retry ladder and splitting |
+| `polish_all.py` | polish pending chunks with a 1→2→4→8 split ladder; `--recheck` validates existing polished files and retries broken ones |
 | `check_polished.py` | re-run the structural/term/residue checks after manual edits |
 
-## Proofreading
+## Proofreading (v1, archived)
 
 | Tool | Purpose |
 |---|---|
 | `proofread_chunk.py` | independent fidelity report for one chunk |
-| `proofread_all.py` | batch proofreading, resumable, writes `summary.md` |
+| `proofread_all.py` | batch proofreading, resumable; reports without a PASS/FAIL verdict are retried, writes `summary.md` |
 | `fix_proofread.py` | minimal fixes guided by a proofread report |
+| `review_book.py` | whole-book continuity review: term/pronoun/timeline/status/reveal drift, with cross-chapter evidence and conflict list |
 
-## Delivery
+## Delivery (v1; build_html remains active)
 
 | Tool | Purpose |
 |---|---|
@@ -53,7 +60,14 @@ virtualenv; most accept `--help`.
 | `split_volumes.py` | split multi-year works into one volume per school year |
 | `build_synopsis.py` | generate per-volume synopsis for cover/illustration work |
 
-## Maintenance
+## Profiles
+
+`profiles/hp-fanfic/` holds the project’s translation profile: one manifest and Markdown
+rule files for translation, polish, proofread, chapter digest, story bible and book
+review. The profile is resolved from `MALFOID_PROFILE`, `meta.json`’s `profile` field, or
+the default `hp-fanfic`.
+
+## Maintenance (v1, archived)
 
 | Tool | Purpose |
 |---|---|
@@ -63,6 +77,16 @@ virtualenv; most accept `--help`.
 
 | Tool | Purpose |
 |---|---|
+| `ingest_book_v2.py` | create a series/book and ingest source files into chapter state |
+| `translate_book_v2.py` | translate pending segments and polish them end-to-end |
+| `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
+| `book_state.py` | series root, book sub-work and glossary master operations |
+| `segment_state.py` | source parsing, chapter/segment state, Markdown rendering |
+| `token_budget.py` | shared deterministic token estimator |
+| `model_api.py` | local OpenAI-compatible model endpoint |
+| `model_client.py` | callable/object client adapter |
+| `batch_translate.py` | translation batch protocol |
+| `polish_batch.py` | polish batch protocol |
 | `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |

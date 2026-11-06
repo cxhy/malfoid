@@ -2,7 +2,7 @@
 """Polish one translated chunk with the local provider (fiction-humanizer-zh rules).
 
 Usage:
-    .venv/bin/python tools/polish_chunk.py <work_dir> chunk0001 [--effort medium]
+    .venv/bin/python tools/polish_chunk.py <work_dir> chunk0001 [--effort minimal]
 
 Reads <work_dir>/work_temp/output_<chunk>.md and glossary.json; writes
 <work_dir>/translation/polished/<chunk>.md. The original translation is never
@@ -22,6 +22,9 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
+
+import prompt_profile
+import term_filter
 
 MODELS = Path.home() / ".pi/agent/models.json"
 PROVIDER = "deepseek-v4-1-flash"
@@ -45,7 +48,7 @@ LEVEL_RULES = {
 5. 对白要像人在现场说话：符合人物年龄、身份、关系和当下情绪；对话标签多样化，不要逐句“说道”“问道”；能用动作、停顿、打断表达时，不要写成长段解释。保留原意，脏话粗话照实，不美化。
 6. 节奏：长短句结合，紧张处句子短，盘算和过渡处可以长；避免连续多段都是同一长度和同一结构。
 7. 标点按中文习惯：对话用“”，省略号用……，破折号用——，不用英文标点；句末标点放在引号内。
-8. 术语表里的专有名词逐字使用指定译名；Darcy 单独出现译“德拉科妮娅”，Dar 译“德拉”，全名译“德拉科妮娅·马尔福”；禁止出现“达西”。
+8. 术语表里的专有名词逐字使用指定译名；人物性别、代词和称呼按原文与术语表，不得自行推断或统一改写。
 9. 不添加译者注，不解释文化背景，不保留英文原词。
 10. 篇幅与原文相当：中文总字数控制在原文的 80%–115%，既不扩写成赏析，也不压成梗概。""",
     "refine": """润色要求（精修档）：
@@ -60,7 +63,7 @@ LEVEL_RULES = {
 5. 对白要像人在现场说话：符合人物年龄、身份、关系和当下情绪；对话标签多样化，能用动作、停顿、打断表达时，不要写成长段解释。保留原意，脏话粗话照实，不美化。
 6. 节奏：长短句结合，紧张处句子短，盘算和过渡处可以长；每 300–500 字给一个自然的小转折、反问、压力升级或情绪落点。
 7. 标点按中文习惯：对话用“”，省略号用……，破折号用——，不用英文标点；句末标点放在引号内。
-8. 术语表里的专有名词逐字使用指定译名；Darcy 单独出现译“德拉科妮娅”，Dar 译“德拉”，全名译“德拉科妮娅·马尔福”；禁止出现“达西”。
+8. 术语表里的专有名词逐字使用指定译名；人物性别、代词和称呼按原文与术语表，不得自行推断或统一改写。
 9. 不添加译者注，不解释文化背景，不保留英文原词。
 10. 篇幅：中文总字数控制在原文的 85%–125%；允许为补足场景动作和余波适度扩写，但不得把场景写成梗概或赏析。""",
     "rewrite": """润色要求（重写档）：
@@ -71,7 +74,7 @@ LEVEL_RULES = {
 5. 对白要像人在现场说话：符合人物年龄、身份、关系和当下情绪；对话标签多样化，能用动作、停顿、打断表达时，不要写成长段解释。保留原意，脏话粗话照实，不美化。
 6. 节奏：长短句结合，紧张处句子短，盘算和过渡处可以长；每个场景要有铺垫、过程、余波，冲突要有代价。
 7. 标点按中文习惯：对话用“”，省略号用……，破折号用——，不用英文标点；句末标点放在引号内。
-8. 术语表里的专有名词逐字使用指定译名；Darcy 单独出现译“德拉科妮娅”，Dar 译“德拉”，全名译“德拉科妮娅·马尔福”；禁止出现“达西”。
+8. 术语表里的专有名词逐字使用指定译名；人物性别、代词和称呼按原文与术语表，不得自行推断或统一改写。
 9. 不添加译者注，不解释文化背景，不保留英文原词。
 10. 篇幅：中文总字数控制在原文的 90%–135%；允许重构和扩写，但不得把场景写成梗概、赏析或另一条情节线。""",
 }
@@ -118,7 +121,10 @@ def call(
     )
     with urllib.request.urlopen(req, timeout=900) as resp:
         data = json.loads(resp.read())
-    return data["choices"][0]["message"]["content"], data.get("usage", {})
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    usage["finish_reason"] = choice.get("finish_reason")
+    return choice["message"]["content"], usage
 
 
 def clean(text: str) -> str:
@@ -133,6 +139,17 @@ CJK = re.compile(r"[\u4e00-\u9fff]")
 URLISH = re.compile(r"(!?\[[^\]]*\]\([^)]*\)|<[^>]+>|https?://\S+)")
 # Family mottos stay in the original Latin/French with a Chinese gloss after them.
 FOREIGN_MOTTO = re.compile(r"(Toujours Pur|Radices Perdurant|Sanctimonia Vinc\w* Semper)")
+
+
+def reasoning_overflow(usage: dict, max_tokens: int) -> bool:
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = details.get("reasoning_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    return (
+        usage.get("finish_reason") == "length"
+        or reasoning >= max_tokens * 0.95
+        or completion >= max_tokens
+    )
 
 
 def blocks(text: str) -> int:
@@ -166,8 +183,10 @@ def check(old: str, new: str, terms: list[dict], level: str = "light") -> list[s
     ratio = cn / max(1, co)
     if not (lo <= ratio <= hi):
         problems.append(f"length {co} -> {cn} ({ratio:.2f})")
-    if "达西" in new:
-        problems.append("forbidden name 达西")
+    forbidden = prompt_profile.forbidden_names(work_dir=Path("."))
+    for name in forbidden:
+        if name in new:
+            problems.append(f"forbidden name {name}")
     residue = english_residue(new)
     if residue:
         problems.append(f"english residue: {residue[0]}")
@@ -234,35 +253,81 @@ def main() -> None:
     glossary = json.loads((temp / "glossary.json").read_text(encoding="utf-8"))
     terms = glossary["terms"]
 
-    term_lines = "\n".join(
-        f"- {t['source']} → {t['target']}"
-        + (f"（别名：{', '.join(t['aliases'])}）" if t.get("aliases") else "")
-        + (f"；{t['notes']}" if t.get("notes") else "")
-        for t in terms
-    )
+    term_lines = term_filter.format_terms(term_filter.select_terms(terms, src, check_target=True))
 
-    rules = LEVEL_RULES[args.level]
-    parts = split_blocks(src, args.split) if args.split > 1 else [src]
+    rules = prompt_profile.compose(LEVEL_RULES[args.level], "polish", work_dir=work)
     base_url, api_key = load_config()
-    outs = []
-    usages = []
-    for i, part in enumerate(parts, 1):
+
+    def polish_part(part: str, i: int, n: int, allow_none: bool):
         prompt = (
             f"{rules}\n\n"
             f"术语表（润色时保持这些译名不变）：\n{term_lines}\n\n"
-            f"待润色译文（第 {i}/{len(parts)} 段）：\n\n{part}"
+            f"待润色译文（第 {i}/{n} 段）：\n\n{part}"
         )
         out, usage = call(base_url, api_key, args.model, prompt, args.effort, args.max_tokens)
-        outs.append(clean(out))
-        usages.append(usage)
+        out = clean(out)
+        src_cjk = len(CJK.findall(part))
+        out_cjk = len(CJK.findall(out))
+        if reasoning_overflow(usage, args.max_tokens) or out_cjk < max(20, int(src_cjk * 0.5)):
+            # Quality first: split again for large parts; only drop reasoning
+            # for small parts, single paragraphs, or when no further split is available.
+            single_paragraph = len(re.split(r"\n\s*\n", part.strip())) <= 1
+            if src_cjk <= 2000 or single_paragraph or allow_none:
+                retry_out, retry_usage = call(
+                    base_url, api_key, args.model, prompt, "none", args.max_tokens
+                )
+                retry_out = clean(retry_out)
+                if len(CJK.findall(retry_out)) > out_cjk:
+                    out = retry_out
+                    usage = {"primary": usage, "fallback": retry_usage}
+            else:
+                print(
+                    f"part {i}/{n} overflowed ({src_cjk} chars); escalating split instead of none",
+                    flush=True,
+                )
+                return "", usage
+        return out, usage
 
-    out = "\n\n".join(o.strip() for o in outs).strip() + "\n"
+    def run_split(n: int, allow_none: bool = False):
+        parts = split_blocks(src, n) if n > 1 else [src]
+        outs = []
+        usages = []
+        for i, part in enumerate(parts, 1):
+            o, u = polish_part(part, i, len(parts), allow_none)
+            outs.append(o)
+            usages.append(u)
+        return "\n\n".join(o.strip() for o in outs).strip() + "\n", usages
+
+    def catastrophic(out: str) -> bool:
+        src_cjk = len(CJK.findall(src))
+        return (
+            headings(src) != headings(out)
+            or blocks(out) == 0
+            or len(CJK.findall(out)) < src_cjk * 0.4
+        )
+
+    paragraph_count = len([p for p in re.split(r"\n\s*\n", src.strip()) if p.strip()])
+    ceiling = max(1, min(paragraph_count, 16))
+    candidates = [args.split]
+    while candidates[-1] < ceiling:
+        candidates.append(min(candidates[-1] * 2, ceiling))
+
+    out = None
+    usages = []
+    used_split = args.split
+    for idx, n in enumerate(candidates):
+        out, usages = run_split(n, allow_none=(idx == len(candidates) - 1))
+        used_split = n
+        if not catastrophic(out):
+            break
+        print(f"split={n} structurally invalid, escalating", flush=True)
+
     dest = args.out or (work / "translation" / "polished" / f"{args.chunk}.md")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(out, encoding="utf-8")
 
     problems = check(src, out, terms, args.level)
-    print(f"{args.chunk}: -> {dest} level={args.level} split={len(parts)} usage {usages}")
+    print(f"{args.chunk}: -> {dest} level={args.level} split={used_split} usage {usages}")
     print("  OK" if not problems else "  WARN " + "; ".join(problems))
     if problems:
         sys.exit(1)
