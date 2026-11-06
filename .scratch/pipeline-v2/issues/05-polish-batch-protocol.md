@@ -4,11 +4,18 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Polish requests exactly one polished target per input 段.
-- [ ] Output is validated for array length and completeness.
-- [ ] A count mismatch is rejected and the original translation is preserved.
-- [ ] A successful polish writes back by segment identity without changing segment order.
-- [ ] Polishing never changes paragraph count or drops content.
-- [ ] Offline tests use a fake model client to cover aligned polish, count mismatch and preservation of the original.
+- [x] Polish requests exactly one polished target per input 段.
+- [x] Output is validated for array length and completeness.
+- [x] A count mismatch is rejected and the original translation is preserved.
+- [x] A successful polish writes back by segment identity without changing segment order.
+- [x] Polishing never changes paragraph count or drops content.
+- [x] Offline tests use a fake model client to cover aligned polish, count mismatch and preservation of the original.
+
+## Comments
+
+- Implemented in `tools/polish_batch.py`, tested in `tests/test_polish_batch.py`.
+- Public seam: `plan_polish_batches`, `polish_batch`, `validate_polish_output`, `apply_polished`, `ProtocolError`.
+- Tests: 14 ticket tests passed; full suite 106 passed; ruff check/format clean.
+- Deferred: glossary and neighbour-context injection into polish prompts belongs to the translation wiring ticket; a separate polished field in segment state is not introduced because polish writes validated results back to `target`.
