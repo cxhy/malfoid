@@ -23,6 +23,11 @@ CHAPTERS_DIR = "chapters"
 DEFAULT_SEGMENT_TOKEN_BUDGET = 800
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _WATTPAD_MARKER_RE = re.compile(r"^\s*===\s*(.*?)\s*===\s*$")
+_CHAPTER_MARKER_RE = re.compile(
+    r"^\s*(?:ch(?:apter)?)\s*(\d+)\s*(?:[:.\-–—]\s*(.*?))?\s*$",
+    re.IGNORECASE,
+)
+_CHAPTER_RANGE_RE = re.compile(r"(?:ch(?:apter)?s?)\s*(\d+)(?:\s*[-–—]\s*(\d+))?", re.IGNORECASE)
 _SENTENCE_END_RE = re.compile(r"""[.!?]+["'”’)\]]*(?=\s|$)""")
 _WORD_BEFORE_RE = re.compile(r"([A-Za-z]+)$")
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc"})
@@ -40,6 +45,31 @@ def _parse_heading(line: str) -> tuple[int, str] | None:
     if m:
         return 1, m.group(1).strip()
     return None
+
+
+def _parse_chapter_marker(line: str) -> tuple[int, str] | None:
+    """Recognise serialized chapter markers such as ``Ch 6`` or ``Chapter 6: Title``."""
+    m = _CHAPTER_MARKER_RE.match(line)
+    if not m:
+        return None
+    return int(m.group(1)), line.strip()
+
+
+def _chapter_range_start(text: str) -> int | None:
+    """Return the first chapter number from a serialized segment title."""
+    m = _CHAPTER_RANGE_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _shift_marker_title(title: str, number: int) -> str:
+    """Renumber a bare chapter marker while leaving custom titles untouched."""
+    m = re.fullmatch(r"\s*(Ch|Chapter)\s*\d+\s*", title, re.IGNORECASE)
+    if not m:
+        return title
+    prefix = m.group(1)
+    if prefix.islower():
+        prefix = prefix.capitalize()
+    return f"{prefix} {number}"
 
 
 def _is_sentence_end(text: str, match: re.Match[str]) -> bool:
@@ -306,12 +336,160 @@ def render_book(book_dir: Path) -> str:
 
 def _chapter_record(chapter: dict) -> dict:
     text = chapter_text(chapter)
+    blocks = logical_blocks(chapter)
     return {
         "index": int(chapter.get("chapter") or 0),
         "title": chapter.get("title") or "",
+        "source_hash": source_hash(text),
+        "paragraph_count": sum(1 for block in blocks if block["kind"] == "text"),
+        "segment_count": len(chapter.get("segments") or []),
         "words": len(re.findall(r"[A-Za-z']+", text)),
         "chars": len(text),
     }
+
+
+def _parse_serialized_source(
+    text: str,
+    fallback_title: str,
+    max_segment_tokens: int | None,
+    chapter_offset: int,
+    chapter_start: int,
+) -> list[dict]:
+    """Parse a source that may contain several serialized chapter markers."""
+    lines = text.splitlines()
+    markers = [
+        (index, marker)
+        for index, line in enumerate(lines)
+        if (marker := _parse_chapter_marker(line)) is not None
+    ]
+    if not markers:
+        chapters = parse_source(text, fallback_title, max_segment_tokens)
+        for position, chapter in enumerate(chapters):
+            chapter["chapter"] = chapter_start + position
+        return chapters
+
+    segment_title = ""
+    for line in lines[: markers[0][0]]:
+        m = _WATTPAD_MARKER_RE.match(line)
+        if m:
+            segment_title = m.group(1).strip()
+            break
+    range_start = _chapter_range_start(segment_title)
+    first_marker = markers[0][1][0]
+    if range_start is not None:
+        inferred_start = range_start + chapter_offset
+    else:
+        inferred_start = max(first_marker - 1 + chapter_offset, chapter_start)
+
+    chapters: list[dict] = []
+    current: dict | None = None
+    para: list[str] = []
+
+    def flush_para() -> None:
+        nonlocal para
+        if current is None:
+            para = []
+            return
+        if para:
+            body = "\n".join(para).strip()
+            if body:
+                current["segments"].append(_segment(len(current["segments"]), "text", body))
+            para = []
+
+    def start_chapter(number: int, title: str) -> None:
+        nonlocal current
+        flush_para()
+        current = _new_chapter(title, 1, [_segment(0, "heading", title, 1)])
+        current["chapter"] = number
+        chapters.append(current)
+
+    for line in lines:
+        marker = _parse_chapter_marker(line)
+        if marker is not None:
+            number, title = marker
+            shifted = number + chapter_offset
+            start_chapter(shifted, _shift_marker_title(title, shifted))
+            continue
+        if _WATTPAD_MARKER_RE.match(line):
+            flush_para()
+            continue
+        if current is None:
+            if line.strip() == "":
+                continue
+            start_chapter(inferred_start, f"Ch {inferred_start}")
+        if line.strip() == "":
+            flush_para()
+        else:
+            para.append(line)
+    flush_para()
+
+    if max_segment_tokens is not None:
+        for chapter in chapters:
+            chapter["segments"] = split_segments(chapter["segments"], max_segment_tokens)
+    return chapters
+
+
+def ingest_sources(
+    book_dir: Path,
+    source_paths: list[Path],
+    chapter_offset: int = 0,
+    max_segment_tokens: int | None = DEFAULT_SEGMENT_TOKEN_BUDGET,
+) -> list[Path]:
+    """Ingest several serialized source files into one continuous book.
+
+    Chapter markers in the source are authoritative and ``chapter_offset`` shifts
+    them into the book's numbering. Sources without markers continue from the last
+    ingested chapter. The completed book is marked with ``source_complete`` so a
+    whole-book prescan can run.
+    """
+    paths = [Path(path) for path in source_paths]
+    if not paths:
+        raise ValueError("at least one source file is required")
+
+    chapters: list[dict] = []
+    next_start = int(chapter_offset) + 1
+    for source_path in paths:
+        text = source_path.read_text(encoding="utf-8")
+        parsed = _parse_serialized_source(
+            text,
+            source_path.stem,
+            max_segment_tokens,
+            int(chapter_offset),
+            next_start,
+        )
+        chapters.extend(parsed)
+        if parsed:
+            next_start = max(int(chapter["chapter"]) for chapter in parsed) + 1
+
+    numbers = [int(chapter["chapter"]) for chapter in chapters]
+    if len(set(numbers)) != len(numbers):
+        raise ValueError("duplicate chapter numbers across source files")
+    chapters.sort(key=lambda chapter: int(chapter["chapter"]))
+
+    paths_out: list[Path] = []
+    for chapter in chapters:
+        path = chapter_path(book_dir, int(chapter["chapter"]))
+        save_chapter(path, chapter)
+        paths_out.append(path)
+
+    source_dir = book_dir / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    work_md = "\n\n".join(render_markdown(chapter) for chapter in chapters) + "\n"
+    (source_dir / "work.md").write_text(work_md, encoding="utf-8")
+
+    meta_path = book_dir / "meta.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["chapters"] = [_chapter_record(chapter) for chapter in chapters]
+        meta["chapter_count"] = len(chapters)
+        meta["word_count"] = sum(record["words"] for record in meta["chapters"])
+        meta["source_files"] = [str(path) for path in paths]
+        meta.setdefault("source_file", str(paths[0]))
+        meta["source_complete"] = True
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    return paths_out
 
 
 def ingest_source(
