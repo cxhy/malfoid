@@ -1,0 +1,32 @@
+{
+  "id": "hp-fanfic",
+  "version": 1,
+  "name": "Harry Potter fanfiction",
+  "target_language": "zh",
+  "source_language": "en",
+  "files": {
+    "translation": "translation.md",
+    "polish": "polish.md",
+    "proofread": "proofread.md",
+    "prescan_digest": "prescan_digest.md",
+    "story_bible": "story_bible.md",
+    "book_review": "book_review.md"
+  },
+  "forbidden_names": ["达西"],
+  "female_draco": {
+    "full": "德拉科妮娅·马尔福",
+    "short": "德拉科妮娅",
+    "nickname": "德拉",
+    "source_forms": ["Darcy", "Draco", "Darcy Malfoy", "Draco Malfoy"],
+    "pronoun": "她"
+  },
+  "continuity_fields": [
+    "学年/年龄/日期",
+    "人物生死与伤病",
+    "秘密与知情范围",
+    "正典偏离与 AU 设定",
+    "学院/血统/身份",
+    "关系与称呼",
+    "咒语与专名"
+  ]
+}

@@ -22,6 +22,7 @@ from typing import Any
 import batch_translate
 import polish_batch
 import segment_state
+from profile_rules import section
 
 
 def load_glossary_terms(book_dir: Path) -> list[dict[str, Any]]:
@@ -73,6 +74,8 @@ def translate_book(
 ) -> dict[str, Any]:
     """Translate pending segments and optionally polish them; return a summary."""
     terms = load_glossary_terms(book_dir)
+    translation_rules = section("translation", work_dir=book_dir)
+    polish_rules = section("polish", work_dir=book_dir)
     translated = polished = 0
     failures: list[dict[str, Any]] = []
     context = ""
@@ -87,6 +90,7 @@ def translate_book(
                 max_retries=max_retries,
                 glossary_terms=terms,
                 context=context,
+                rules=translation_rules,
             )
             stats = batch_translate.apply_targets(chapter, results)
             translated += stats["applied"]
@@ -105,6 +109,7 @@ def translate_book(
                         to_polish,
                         budget=budget,
                         max_retries=max_retries,
+                        rules=polish_rules,
                     )
                     polished_stats = polish_batch.apply_polished(chapter, polished_results)
                     polished += polished_stats["applied"]

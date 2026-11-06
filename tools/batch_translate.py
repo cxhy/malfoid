@@ -122,14 +122,22 @@ def _context_lines(
     return lines
 
 
+def _rule_lines(rules: str | None) -> list[str]:
+    if not isinstance(rules, str) or not rules.strip():
+        return []
+    return ["Translation rules:", rules.strip(), ""]
+
+
 def build_batch_prompt(
     segments: list[dict[str, Any]],
     glossary_terms: list[Any] | None = None,
     context: str | None = None,
+    rules: str | None = None,
 ) -> str:
-    """Build a numbered batch request with optional glossary and neighbour context."""
+    """Build a numbered batch request with optional rules, glossary and context."""
     lines = [
         "Translate each numbered source segment into Simplified Chinese.",
+        *_rule_lines(rules),
         *_context_lines(segments, glossary_terms, context),
         *_protocol_preamble(len(segments)),
     ]
@@ -142,10 +150,12 @@ def build_single_prompt(
     segment: dict[str, Any],
     glossary_terms: list[Any] | None = None,
     context: str | None = None,
+    rules: str | None = None,
 ) -> str:
     """Build a one-segment request for the fallback path."""
     lines = [
         "Translate the source segment into Simplified Chinese.",
+        *_rule_lines(rules),
         *_context_lines([segment], glossary_terms, context),
         *_protocol_preamble(1),
     ]
@@ -221,6 +231,7 @@ def _fallback(
     segments: list[dict[str, Any]],
     glossary_terms: list[Any] | None = None,
     context: str | None = None,
+    rules: str | None = None,
 ) -> list[dict[str, Any]]:
     results = []
     for segment in segments:
@@ -228,7 +239,9 @@ def _fallback(
             targets = extract_targets(
                 call_client(
                     client,
-                    build_single_prompt(segment, glossary_terms=glossary_terms, context=context),
+                    build_single_prompt(
+                        segment, glossary_terms=glossary_terms, context=context, rules=rules
+                    ),
                 ),
                 1,
             )
@@ -264,6 +277,7 @@ def translate_batch(
     max_retries: int = MAX_PROTOCOL_RETRIES,
     glossary_terms: list[Any] | None = None,
     context: str | None = None,
+    rules: str | None = None,
 ) -> list[dict[str, Any]]:
     """Translate segments with an equal-length completeness contract.
 
@@ -279,7 +293,7 @@ def translate_batch(
     try:
         batches = plan_batch(segments, budget, measure)
     except ValueError:
-        return _fallback(client, segments, glossary_terms, context)
+        return _fallback(client, segments, glossary_terms, context, rules)
 
     results: list[dict[str, Any]] = []
     for batch in batches:
@@ -290,7 +304,9 @@ def translate_batch(
                 targets = extract_targets(
                     call_client(
                         client,
-                        build_batch_prompt(batch, glossary_terms=glossary_terms, context=context),
+                        build_batch_prompt(
+                            batch, glossary_terms=glossary_terms, context=context, rules=rules
+                        ),
                     ),
                     len(batch),
                 )
@@ -302,7 +318,7 @@ def translate_batch(
                 )
             break
         else:
-            results.extend(_fallback(client, batch, glossary_terms, context))
+            results.extend(_fallback(client, batch, glossary_terms, context, rules))
 
     return results
 

@@ -34,11 +34,18 @@ def _protocol_preamble(count: int) -> list[str]:
     ]
 
 
-def build_polish_prompt(segments: list[dict[str, Any]]) -> str:
+def _rule_lines(rules: str | None) -> list[str]:
+    if not isinstance(rules, str) or not rules.strip():
+        return []
+    return ["Polish rules:", rules.strip(), ""]
+
+
+def build_polish_prompt(segments: list[dict[str, Any]], rules: str | None = None) -> str:
     """Build a numbered polish request for exactly one target per segment."""
     lines = [
         "Polish each numbered Chinese translation segment.",
         "Keep the meaning, characters, plot and tone unchanged.",
+        *_rule_lines(rules),
         *_protocol_preamble(len(segments)),
     ]
     for segment in segments:
@@ -46,11 +53,12 @@ def build_polish_prompt(segments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def build_single_polish_prompt(segment: dict[str, Any]) -> str:
+def build_single_polish_prompt(segment: dict[str, Any], rules: str | None = None) -> str:
     """Build a one-segment polish request for the fallback path."""
     lines = [
         "Polish the Chinese translation segment.",
         "Keep the meaning, characters, plot and tone unchanged.",
+        *_rule_lines(rules),
         *_protocol_preamble(1),
     ]
     lines.append(f"[{segment.get('index')}] {segment.get('target') or ''}")
@@ -115,12 +123,14 @@ def _error_text(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-def _fallback(client: Any, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fallback(
+    client: Any, segments: list[dict[str, Any]], rules: str | None = None
+) -> list[dict[str, Any]]:
     results = []
     for segment in segments:
         try:
             targets = validate_polish_output(
-                call_client(client, build_single_polish_prompt(segment)), 1
+                call_client(client, build_single_polish_prompt(segment, rules=rules)), 1
             )
         except Exception as exc:
             results.append(
@@ -152,6 +162,7 @@ def polish_batch(
     budget: int = DEFAULT_BATCH_BUDGET,
     measure=None,
     max_retries: int = MAX_PROTOCOL_RETRIES,
+    rules: str | None = None,
 ) -> list[dict[str, Any]]:
     """Polish translated segments with an equal-length completeness contract.
 
@@ -171,7 +182,7 @@ def polish_batch(
     try:
         batches = plan_polish_batches(segments, budget, measure)
     except ValueError:
-        return _fallback(client, segments)
+        return _fallback(client, segments, rules)
 
     results: list[dict[str, Any]] = []
     for batch in batches:
@@ -180,7 +191,7 @@ def polish_batch(
             attempts += 1
             try:
                 targets = validate_polish_output(
-                    call_client(client, build_polish_prompt(batch)), len(batch)
+                    call_client(client, build_polish_prompt(batch, rules=rules)), len(batch)
                 )
             except ProtocolError:
                 continue
@@ -190,7 +201,7 @@ def polish_batch(
                 )
             break
         else:
-            results.extend(_fallback(client, batch))
+            results.extend(_fallback(client, batch, rules))
 
     return results
 

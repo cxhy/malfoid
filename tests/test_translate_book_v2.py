@@ -91,3 +91,11 @@ def test_translate_book_records_failures(tmp_path: Path) -> None:
     summary = translate_book_v2.translate_book(book, FakeClient(fail=True), max_retries=0)
     assert summary["translated"] == 0
     assert summary["failures"]
+
+
+def test_translate_book_injects_profile_rules(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+    client = FakeClient()
+    translate_book_v2.translate_book(book, client)
+    assert any("哈利波特同人翻译约定" in prompt for prompt in client.calls)
+    assert any("哈利波特同人润色约定" in prompt for prompt in client.calls)
