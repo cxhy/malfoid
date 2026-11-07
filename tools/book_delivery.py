@@ -26,6 +26,7 @@ class DeliveryResult:
     title: str
     markdown: Path
     html: Path
+    markdown_parts: list[Path]
 
 
 def _read_meta(book_dir: Path) -> dict[str, Any]:
@@ -65,13 +66,98 @@ def render_markdown(book_dir: Path) -> str:
     return segment_state.render_book(Path(book_dir), translated=True)
 
 
+def _chapter_blocks(markdown: str) -> list[str]:
+    blocks = [block for block in re.split(r"(?m)^(?=# )", markdown) if block.strip()]
+    return blocks or [markdown]
+
+
+def _minimum_parts(sizes: list[int], limit: int) -> int:
+    parts = 1
+    current = 0
+    for size in sizes:
+        if current and current + size > limit:
+            parts += 1
+            current = size
+        else:
+            current += size
+    return parts
+
+
+def _balanced_partition(sizes: list[int], limit: int) -> list[tuple[int, int]]:
+    """Split chapter sizes into the fewest parts, balanced by squared deviation."""
+    if any(size > limit for size in sizes):
+        raise ValueError("a chapter block exceeds the Markdown part limit")
+    total = sum(sizes)
+    if total <= limit:
+        return []
+    parts = _minimum_parts(sizes, limit)
+    target = total / parts
+    count = len(sizes)
+    prefix = [0]
+    for size in sizes:
+        prefix.append(prefix[-1] + size)
+    infinity = float("inf")
+    cost = [[infinity] * (count + 1) for _ in range(parts + 1)]
+    previous = [[-1] * (count + 1) for _ in range(parts + 1)]
+    cost[0][0] = 0.0
+    for part in range(1, parts + 1):
+        for end in range(1, count + 1):
+            for start in range(part - 1, end):
+                block_size = prefix[end] - prefix[start]
+                if block_size > limit or cost[part - 1][start] == infinity:
+                    continue
+                candidate = cost[part - 1][start] + (block_size - target) ** 2
+                if candidate < cost[part][end]:
+                    cost[part][end] = candidate
+                    previous[part][end] = start
+    if cost[parts][count] == infinity:
+        raise ValueError("cannot partition Markdown into parts under the limit")
+    boundaries = [count]
+    end = count
+    for part in range(parts, 0, -1):
+        start = previous[part][end]
+        if start < 0:
+            raise ValueError("cannot reconstruct Markdown part boundaries")
+        boundaries.append(start)
+        end = start
+    boundaries.reverse()
+    return list(zip(boundaries[:-1], boundaries[1:]))
+
+
+def split_markdown(markdown: str, limit: int) -> list[str]:
+    """Split Markdown at chapter boundaries into balanced parts under ``limit``."""
+    if limit <= 0:
+        raise ValueError("Markdown part limit must be positive")
+    blocks = _chapter_blocks(markdown)
+    sizes = [len(block) for block in blocks]
+    ranges = _balanced_partition(sizes, limit)
+    return [
+        "\n\n".join(block.strip("\n") for block in blocks[start:end]).rstrip() + "\n"
+        for start, end in ranges
+    ]
+
+
+def part_paths(book_dir: Path, title: str, count: int) -> list[Path]:
+    """Return the Markdown part paths for a title."""
+    output_dir = Path(book_dir) / "translation"
+    name = safe_title(title)
+    return [output_dir / f"{name} - Part {index}.md" for index in range(1, count + 1)]
+
+
 def write_delivery(
     book_dir: Path,
     *,
     title: str | None = None,
     author: str | None = None,
+    split_chars: int | None = 80000,
 ) -> DeliveryResult:
-    """Render Markdown and template HTML under ``translation/<title>``."""
+    """Render Markdown and template HTML under ``translation/<title>``.
+
+    The full Markdown and single HTML are always kept. When ``split_chars`` is
+    given and the Markdown exceeds it, balanced chapter-boundary parts are also
+    written as ``<title> - Part N.md``. A single chapter larger than the limit
+    is an error: parts never split inside a chapter.
+    """
     book = Path(book_dir)
     meta = _read_meta(book)
     resolved_title = title or str(meta.get("title") or book.name)
@@ -80,9 +166,26 @@ def write_delivery(
 
     markdown_path, html_path = delivery_paths(book, resolved_title)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    markdown_path.write_text(render_markdown(book), encoding="utf-8")
+    markdown = render_markdown(book)
+    markdown_path.write_text(markdown, encoding="utf-8")
     build_html.build_from(book, markdown_path, html_path, resolved_title)
-    return DeliveryResult(title=resolved_title, markdown=markdown_path, html=html_path)
+
+    parts: list[Path] = []
+    output_dir = markdown_path.parent
+    name = safe_title(resolved_title)
+    for stale in output_dir.glob(f"{name} - Part *.md"):
+        stale.unlink()
+    if split_chars is not None:
+        texts = split_markdown(markdown, split_chars)
+        parts = part_paths(book, resolved_title, len(texts))
+        for path, text in zip(parts, texts):
+            path.write_text(text, encoding="utf-8")
+    return DeliveryResult(
+        title=resolved_title,
+        markdown=markdown_path,
+        html=html_path,
+        markdown_parts=parts,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -90,10 +193,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("book_dir", type=Path)
     parser.add_argument("--title")
     parser.add_argument("--author")
+    parser.add_argument("--split-md-chars", type=int, default=80000)
+    parser.add_argument("--no-split-md", action="store_true")
     args = parser.parse_args(argv)
-    result = write_delivery(args.book_dir, title=args.title, author=args.author)
+    split_chars = None if args.no_split_md else args.split_md_chars
+    result = write_delivery(
+        args.book_dir,
+        title=args.title,
+        author=args.author,
+        split_chars=split_chars,
+    )
     print(f"markdown: {result.markdown}")
     print(f"html: {result.html}")
+    for path in result.markdown_parts:
+        print(f"part: {path}")
 
 
 if __name__ == "__main__":

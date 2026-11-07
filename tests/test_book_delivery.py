@@ -92,3 +92,58 @@ def test_write_delivery_accepts_title_and_author_overrides(tmp_path: Path) -> No
 def test_safe_title_removes_path_separators() -> None:
     assert book_delivery.safe_title("A/B\\C") == "A-B-C"
     assert book_delivery.safe_title("   ") == "book"
+
+
+def _write_book_with_sized_chapters(tmp_path: Path, sizes: list[int]) -> Path:
+    book = tmp_path / "book"
+    meta = {"title": "Book One", "author": "Test Author"}
+    (book / "meta.json").parent.mkdir(parents=True, exist_ok=True)
+    (book / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    for number, size in enumerate(sizes, start=1):
+        chapter = {
+            "chapter": number,
+            "title": f"Chapter {number}",
+            "heading_level": 1,
+            "segments": [
+                _segment(0, f"Chapter {number}", f"第{number}章", kind="heading"),
+                _segment(1, f"Source {number}", "字" * size),
+            ],
+        }
+        segment_state.save_chapter(segment_state.chapter_path(book, number), chapter)
+    return book
+
+
+def test_write_delivery_splits_markdown_at_chapter_boundaries(tmp_path: Path) -> None:
+    book = _write_book_with_sized_chapters(tmp_path, [40, 40, 40, 40])
+    result = book_delivery.write_delivery(book, split_chars=100)
+    assert result.markdown.is_file()
+    assert result.html.is_file()
+    assert len(result.markdown_parts) >= 2
+    for index, path in enumerate(result.markdown_parts, start=1):
+        assert path == book / "translation" / f"Book One - Part {index}.md"
+        assert path.is_file()
+        assert len(path.read_text(encoding="utf-8")) <= 100
+    assert "字" * 40 in result.markdown.read_text(encoding="utf-8")
+
+
+def test_write_delivery_keeps_single_markdown_when_under_limit(tmp_path: Path) -> None:
+    book = _write_book_with_sized_chapters(tmp_path, [10, 10])
+    result = book_delivery.write_delivery(book, split_chars=1000)
+    assert result.markdown_parts == []
+
+
+def test_split_markdown_balances_chapter_boundaries() -> None:
+    markdown = "\n\n".join(f"# 第{i}章\n\n{'字' * 10}" for i in range(1, 5)) + "\n"
+    parts = book_delivery.split_markdown(markdown, 40)
+    assert len(parts) == 2
+    assert [len(part) for part in parts] == [37, 37]
+
+
+def test_split_markdown_rejects_a_single_oversized_chapter() -> None:
+    markdown = "# 第一章\n\n" + "字" * 50 + "\n"
+    try:
+        book_delivery.split_markdown(markdown, 20)
+    except ValueError as exc:
+        assert "chapter" in str(exc)
+    else:
+        raise AssertionError("oversized chapter should be rejected")
