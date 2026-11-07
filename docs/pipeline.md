@@ -38,7 +38,8 @@ works/<series-id>-<slug>/
     │   ├── polished/         polished text + book.md + book.html
     │   ├── proofread/        per-chunk fidelity reports (legacy)
     │   ├── review/           structured review JSON + human summaries
-    │   └── <Title>.md / .html  final reader-facing deliverables
+    │   ├── <Title>.md / .html  final full Markdown + single HTML
+    │   └── <Title> - Part N.md  balanced Markdown parts (when over the limit)
     └── archive/<timestamp>/  previous source version after an incremental update
 
 works/<work-id>-<slug>/       legacy single-book work (unchanged)
@@ -252,6 +253,11 @@ metrics, and writes a Book 1 GO/NO-GO acceptance record. `review_book_v2.py` is 
 generic whole-book review runner. Both write only under `translation/review/` and
 stay advisory. `book_delivery.py` renders translated segment state to
 `translation/<title>.md` and `translation/<title>.html` through `build_html.py`.
+The full Markdown and single HTML are always kept. When the Markdown exceeds
+`--split-md-chars` (default 80,000 characters), delivery also writes balanced
+chapter-boundary parts as `translation/<title> - Part N.md`; parts never split
+inside a chapter, and an oversized chapter raises an error. Use `--no-split-md`
+to disable splitting.
 
 The v2 review call injects the active profile's proofread and book-review rules
 (including the female-Draco contract) into every block prompt, so AU changes are

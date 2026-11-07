@@ -95,7 +95,7 @@ the default `hp-fanfic`.
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
 | `review_book_v2.py` | whole-book review runner (blocks, evidence, reports, `--limit-blocks`) |
 | `fix_review_issues.py` | apply confirmed review suggestions to segment targets, resumable |
-| `book_delivery.py` | render translated segment state to `translation/<title>.md/.html` |
+| `book_delivery.py` | render full Markdown + HTML; split Markdown into balanced `Part N` files |
 | `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
 | `review_evidence.py` | verify review candidates and arbitrate conflicts |
 | `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
