@@ -27,7 +27,12 @@ works/<series-id>-<slug>/
     │   ├── chunk0001.md      source chunk (v1)
     │   ├── output_chunk0001.md  raw translation (v1)
     │   ├── prompt_ctx/       glossary + neighbour excerpts per chunk
-    │   └── manifest.json     chunk metadata
+    │   ├── manifest.json     chunk metadata
+    │   ├── progress.jsonl    per-chapter translation progress
+    │   ├── usage.jsonl       per-call model usage and duration
+    │   ├── review_cache/     complete review blocks keyed by content + rules
+    │   ├── review_traces/    raw responses from rejected review calls
+    │   └── fix_review/       fix log + idempotency state
     ├── translation/
     │   ├── draft/            unpolished merged book
     │   ├── polished/         polished text + book.md + book.html
@@ -228,8 +233,18 @@ neighbouring legacy chunks. Output is `translation/preview/book.md` and
 ```bash
 python tools/review_preview.py works/<legacy-work>/preview_v2
 python tools/review_book_v2.py works/<series>/books/book-01
+python tools/fix_review_issues.py works/<series>/books/book-01
 python tools/book_delivery.py works/<series>/books/book-01
 ```
+
+Before a full review after changing the review prompt, effort or profile, run a
+one-block smoke test: `review_book_v2.py <book> --limit-blocks 1`. It writes only
+the first block under `translation/review/smoke/` and exits, so prompt
+regressions cost one block instead of a whole-book rerun and the full review
+reports stay untouched. The fixer reads confirmed issues from `translation/review/`,
+applies one target per affected segment, and records applied segments in
+`work_temp/fix_review/state.json`; reruns skip already-applied targets and exit
+0 with recorded failures unless `--strict` is passed.
 
 `review_preview.py` plans review blocks over the whole preview, maps global review
 indices back to chapter/local positions, records alignment and false-positive
@@ -237,6 +252,19 @@ metrics, and writes a Book 1 GO/NO-GO acceptance record. `review_book_v2.py` is 
 generic whole-book review runner. Both write only under `translation/review/` and
 stay advisory. `book_delivery.py` renders translated segment state to
 `translation/<title>.md` and `translation/<title>.html` through `build_html.py`.
+
+The v2 review call injects the active profile's proofread and book-review rules
+(including the female-Draco contract) into every block prompt, so AU changes are
+not "corrected" back to canon. It uses JSON mode and a tolerant parser that
+accepts only boundary-only repairs (fence, missing outer delimiter); structural
+JSON repairs are rejected. A rejected block bisects recursively down to single segments, then
+retries each segment a bounded number of times. Every block writes a recovery
+trace with the raw model response to `work_temp/review_traces/`, and block
+results are cached under `work_temp/review_cache/`. Review defaults to effort
+`none` because low reasoning stalls large review blocks on the local model; the
+per-call timeout is `MALFOID_REVIEW_TIMEOUT` (default 900s). The review call
+budget (`--max-calls`, default 128) bounds total calls per block so recursive
+bisection cannot become an exponential ladder.
 
 ## Model configuration
 
@@ -246,6 +274,16 @@ All model-calling tools resolve the endpoint in this order:
    chat-completions endpoint;
 2. `MALFOID_MODEL` overrides the model name where a tool accepts `--model`;
 3. fallback: the local pi model registry at `~/.pi/agent/models.json`.
+
+Other environment variables:
+
+- `MALFOID_TIMEOUT` — per-call timeout for translation/polish (default 900s);
+- `MALFOID_REVIEW_TIMEOUT` — per-call timeout for review calls (default 900s);
+- `MALFOID_PROFILE` — override the profile id (default `hp-fanfic`).
+
+Run `tools/preflight_model.py` before launching parallel work. It measures one
+concurrent pair against two sequential calls and prints the recommended worker
+count; the local endpoint is usually serial (`workers=1`).
 
 This keeps the pipeline portable while preserving the original local-model workflow.
 
