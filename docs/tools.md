@@ -78,21 +78,25 @@ the default `hp-fanfic`.
 | Tool | Purpose |
 |---|---|
 | `ingest_book_v2.py` | create a series/book and ingest source files into chapter state |
+| `txt_convert.py` | convert chapter-numbered TXT into Markdown + `meta.json` |
 | `translate_book_v2.py` | translate pending segments and polish them end-to-end |
 | `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
 | `book_state.py` | series root, book sub-work and glossary master operations |
 | `segment_state.py` | source parsing, chapter/segment state, Markdown rendering |
 | `token_budget.py` | shared deterministic token estimator |
 | `model_api.py` | local OpenAI-compatible model endpoint |
+| `profile_rules.py` | resolve the active profile and compose stage rules |
+| `preflight_model.py` | probe endpoint concurrency and recommend a worker count |
 | `model_client.py` | callable/object client adapter |
 | `batch_translate.py` | translation batch protocol |
 | `polish_batch.py` | polish batch protocol |
 | `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
-| `review_book_v2.py` | generic whole-book review runner (blocks, evidence, reports) |
+| `review_book_v2.py` | whole-book review runner (blocks, evidence, reports, `--limit-blocks`) |
+| `fix_review_issues.py` | apply confirmed review suggestions to segment targets, resumable |
 | `book_delivery.py` | render translated segment state to `translation/<title>.md/.html` |
-| `review_blocks.py` | plan review blocks, validate structured output and bisect |
+| `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
 | `review_evidence.py` | verify review candidates and arbitrate conflicts |
 | `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
 

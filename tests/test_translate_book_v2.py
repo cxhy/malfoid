@@ -99,3 +99,14 @@ def test_translate_book_injects_profile_rules(tmp_path: Path) -> None:
     translate_book_v2.translate_book(book, client)
     assert any("哈利波特同人翻译约定" in prompt for prompt in client.calls)
     assert any("哈利波特同人润色约定" in prompt for prompt in client.calls)
+
+
+def test_translate_book_writes_progress_rows(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+    translate_book_v2.translate_book(book, FakeClient())
+    progress = book / "work_temp" / "progress.jsonl"
+    assert progress.is_file()
+    rows = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert [row["chapter"] for row in rows] == [1, 2]
+    assert all(row["translated"] > 0 for row in rows)

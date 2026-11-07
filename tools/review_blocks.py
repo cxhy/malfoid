@@ -17,19 +17,30 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import json_repair
 from batch_translate import DEFAULT_BATCH_BUDGET
 from model_client import call_client
 from token_budget import estimate_tokens
 
 REVIEW_BATCH_FACTOR = 3
 DEFAULT_REVIEW_BUDGET = REVIEW_BATCH_FACTOR * DEFAULT_BATCH_BUDGET
-DEFAULT_WORKERS = 2
-DEFAULT_BISECT_DEPTH = 2
-DEFAULT_SEGMENT_RETRIES = 1
+DEFAULT_WORKERS = 1
+DEFAULT_BISECT_DEPTH = 8
+DEFAULT_SEGMENT_RETRIES = 2
+DEFAULT_MAX_CALLS = 128
+TRACE_RAW_CHARS = 12000
 
 
 class ReviewProtocolError(ValueError):
-    """Raised when review output does not satisfy the structured contract."""
+    """Raised when review output does not satisfy the structured contract.
+
+    ``raw`` keeps the model response that failed validation so callers can
+    persist it for diagnosis instead of losing the evidence.
+    """
+
+    def __init__(self, message: str, raw: str | None = None) -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 def plan_blocks(
@@ -72,6 +83,8 @@ def _protocol_contract(count: int) -> list[str]:
         "issues: an array of objects; each has an integer segment_index and a non-empty message.",
         "Each issue may also include optional subject and proposal strings: subject groups "
         "related issues across blocks, and proposal states the recommended fix.",
+        "Report only substantive defects. Omit segments with no issue; never emit an "
+        "issue whose proposal is 'No change needed'.",
         f"reviewed_segments: the integer {count}, matching the number of segments below.",
         "complete: true.",
         "Do not translate, rewrite, edit or add commentary.",
@@ -79,15 +92,17 @@ def _protocol_contract(count: int) -> list[str]:
     ]
 
 
-def build_review_prompt(block: list[dict[str, Any]]) -> str:
+def build_review_prompt(block: list[dict[str, Any]], rules: str | None = None) -> str:
     """Build a numbered source/target review request for one block."""
     lines = [
         "TASK: REVIEW",
         "Review these numbered source/target segment pairs for cross-chapter "
         "consistency: term and name drift, pronoun and gender use, timeline and "
         "character state, premature spoilers, AU rule breaks and tone drift.",
-        *_protocol_contract(len(block)),
     ]
+    if isinstance(rules, str) and rules.strip():
+        lines.extend(["PROFILE RULES (must follow):", rules.strip(), ""])
+    lines.extend(_protocol_contract(len(block)))
     for segment in block:
         lines.append(f"[{segment.get('index')}]")
         lines.append(f"SOURCE: {segment.get('source') or ''}")
@@ -95,23 +110,88 @@ def build_review_prompt(block: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_PARSE_FAILED = object()
+
+
+def _strict_value(candidate: str) -> Any:
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, TypeError):
+        return _PARSE_FAILED
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    left_json = json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    right_json = json.dumps(right, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return left_json == right_json
+
+
+def _is_boundary_only_repair(raw: str, repaired_value: Any) -> bool:
+    """Accept only repairs that expose an unchanged strict JSON value.
+
+    A missing outer closing delimiter, surplus closing delimiters, or a JSON
+    value inside a Markdown fence are safe. Completing strings, keys or array
+    items is structural and is rejected because it could invent review content.
+    """
+    for delimiter in ("}", "]"):
+        candidate = _strict_value(raw + delimiter)
+        if candidate is not _PARSE_FAILED and _same_json_value(candidate, repaired_value):
+            return True
+
+    without_extra = raw
+    while without_extra.endswith(("}", "]")):
+        without_extra = without_extra[:-1].rstrip()
+        candidate = _strict_value(without_extra)
+        if candidate is not _PARSE_FAILED and _same_json_value(candidate, repaired_value):
+            return True
+
+    lines = raw.splitlines()
+    if (
+        len(lines) >= 3
+        and lines[0].strip().lower() in {"```", "```json"}
+        and lines[-1].strip() == "```"
+    ):
+        candidate = _strict_value("\n".join(lines[1:-1]).strip())
+        if candidate is not _PARSE_FAILED and _same_json_value(candidate, repaired_value):
+            return True
+    return False
+
+
 def _parse_json(text: Any) -> Any:
     if not isinstance(text, str):
         raise ReviewProtocolError("model output is not text")
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[A-Za-z]*\s*\n?", "", stripped)
-        stripped = re.sub(r"\n?```\s*$", "", stripped)
+    raw = text.strip()
     try:
-        return json.loads(stripped)
+        return json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"(\[.*\]|\{.*\})", stripped, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-        raise ReviewProtocolError("model output is not valid JSON") from None
+        pass
+
+    try:
+        value = json_repair.repair_json(raw, return_objects=True, skip_json_loads=True)
+    except Exception:
+        raise ReviewProtocolError("model output is not valid JSON", raw=raw) from None
+    if value == "":
+        raise ReviewProtocolError("model output is not valid JSON", raw=raw)
+    if not _is_boundary_only_repair(raw, value):
+        raise ReviewProtocolError("model output needs structural JSON repair", raw=raw)
+    return value
+
+
+_NO_ISSUE_PROPOSAL = re.compile(r"^\s*(no change needed|no change|none|n/?a)\.?\s*$", re.I)
+_NO_ISSUE_MESSAGE = re.compile(
+    r"(?:^|[.!?。]\s*)(?:no issue|no defect|no problem)[.!?。]*\s*$"
+    r"|(?:无问题|无需修改|不需要修改|无需改动|无需调整)[。.!?]*\s*$",
+    re.I,
+)
+
+
+def _is_no_issue(issue: dict[str, Any]) -> bool:
+    """Reject model entries that explicitly say the segment needs no change."""
+    proposal = (issue.get("proposal") or "").strip()
+    message = (issue.get("message") or "").strip()
+    if proposal and _NO_ISSUE_PROPOSAL.match(proposal):
+        return True
+    return bool(_NO_ISSUE_MESSAGE.search(message))
 
 
 def validate_review_output(
@@ -158,6 +238,8 @@ def validate_review_output(
             value = issue.get(field)
             if not isinstance(value, str) or not value.strip():
                 raise ReviewProtocolError(f"issue {position} has an invalid {field}")
+        if _is_no_issue(issue):
+            continue
         cleaned.append(issue)
     return {"issues": cleaned, "reviewed_segments": reviewed, "complete": True}
 
@@ -216,11 +298,38 @@ def _failure(
     }
 
 
-def _review_once(client: Any, block: list[dict[str, Any]]) -> dict[str, Any]:
+def _clip_raw(raw: Any) -> str:
+    text = raw if isinstance(raw, str) else str(raw)
+    if len(text) <= TRACE_RAW_CHARS:
+        return text
+    return text[:TRACE_RAW_CHARS] + "\n…[truncated]"
+
+
+def _review_once(
+    client: Any, block: list[dict[str, Any]], rules: str | None = None
+) -> dict[str, Any]:
     allowed = {segment.get("index") for segment in block}
-    return validate_review_output(
-        call_client(client, build_review_prompt(block)), len(block), allowed
-    )
+    raw = call_client(client, build_review_prompt(block, rules=rules))
+    try:
+        return validate_review_output(raw, len(block), allowed)
+    except ReviewProtocolError as exc:
+        if exc.raw is None:
+            exc.raw = raw if isinstance(raw, str) else str(raw)
+        raise
+
+
+class _CallBudget:
+    """Bound total model calls for one review block, not just recursion depth."""
+
+    def __init__(self, max_calls: int | None) -> None:
+        self.max_calls = max_calls
+        self.calls = 0
+
+    def take(self) -> bool:
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            return False
+        self.calls += 1
+        return True
 
 
 def _review_leaf(
@@ -229,18 +338,43 @@ def _review_leaf(
     depth: int,
     max_depth: int,
     max_segment_retries: int,
+    rules: str | None = None,
+    trace=None,
+    budget: _CallBudget | None = None,
 ) -> list[dict[str, Any]]:
-    """Review one block, bisecting protocol failures within the depth bound."""
+    """Review one block, bisecting protocol failures down to single segments."""
     if len(block) == 1:
         attempts = 0
         last_error = "review output was rejected"
-        for _ in range(max_segment_retries + 1):
+        for attempt in range(max_segment_retries + 1):
             attempts += 1
+            if budget is not None and not budget.take():
+                return [_failure(block, "review call budget exhausted", attempts=0, depth=depth)]
             try:
-                payload = _review_once(client, block)
+                payload = _review_once(client, block, rules)
             except ReviewProtocolError as exc:
                 last_error = _error_text(exc)
+                if trace is not None:
+                    trace(
+                        {
+                            "event": "rejected",
+                            "depth": depth,
+                            "segments": _indices(block),
+                            "attempt": attempts,
+                            "error": last_error,
+                            "raw": _clip_raw(exc.raw),
+                        }
+                    )
                 continue
+            if trace is not None:
+                trace(
+                    {
+                        "event": "accepted",
+                        "depth": depth,
+                        "segments": _indices(block),
+                        "attempt": attempts,
+                    }
+                )
             return [_success(block, payload, attempts=attempts, depth=depth)]
         return [_failure(block, last_error, attempts=attempts, depth=depth)]
 
@@ -254,18 +388,59 @@ def _review_leaf(
                     depth,
                     max_depth,
                     max_segment_retries,
+                    rules,
+                    trace,
+                    budget,
                 )
             )
         return leaves
 
     attempts = 1
+    if budget is not None and not budget.take():
+        return [_failure(block, "review call budget exhausted", attempts=0, depth=depth)]
     try:
-        payload = _review_once(client, block)
-    except ReviewProtocolError:
+        payload = _review_once(client, block, rules)
+    except ReviewProtocolError as exc:
+        if trace is not None:
+            trace(
+                {
+                    "event": "rejected",
+                    "depth": depth,
+                    "segments": _indices(block),
+                    "attempt": attempts,
+                    "error": _error_text(exc),
+                    "raw": _clip_raw(exc.raw),
+                }
+            )
         midpoint = len(block) // 2
         return _review_leaf(
-            client, block[:midpoint], depth + 1, max_depth, max_segment_retries
-        ) + _review_leaf(client, block[midpoint:], depth + 1, max_depth, max_segment_retries)
+            client,
+            block[:midpoint],
+            depth + 1,
+            max_depth,
+            max_segment_retries,
+            rules,
+            trace,
+            budget,
+        ) + _review_leaf(
+            client,
+            block[midpoint:],
+            depth + 1,
+            max_depth,
+            max_segment_retries,
+            rules,
+            trace,
+            budget,
+        )
+    if trace is not None:
+        trace(
+            {
+                "event": "accepted",
+                "depth": depth,
+                "segments": _indices(block),
+                "attempt": attempts,
+            }
+        )
     return [_success(block, payload, attempts=attempts, depth=depth)]
 
 
@@ -275,6 +450,9 @@ def review_block(
     *,
     max_bisect_depth: int = DEFAULT_BISECT_DEPTH,
     max_segment_retries: int = DEFAULT_SEGMENT_RETRIES,
+    max_calls: int | None = DEFAULT_MAX_CALLS,
+    rules: str | None = None,
+    trace=None,
 ) -> dict[str, Any]:
     """Review one planned block and return its structured, deterministic result.
 
@@ -290,7 +468,17 @@ def review_block(
     if max_segment_retries < 0:
         raise ValueError("max_segment_retries must not be negative")
 
-    parts = _review_leaf(client, block, 0, max_bisect_depth, max_segment_retries)
+    budget = _CallBudget(max_calls)
+    parts = _review_leaf(
+        client,
+        block,
+        0,
+        max_bisect_depth,
+        max_segment_retries,
+        rules=rules,
+        trace=trace,
+        budget=budget,
+    )
     issues: list[dict[str, Any]] = []
     for part in parts:
         issues.extend(part["issues"])
@@ -317,10 +505,18 @@ def review_block(
     }
 
 
-def block_cache_key(block: list[dict[str, Any]]) -> str:
+CACHE_VERSION = 4
+
+
+def block_cache_key(block: list[dict[str, Any]], rules: str | None = None) -> str:
+    rules_hash = hashlib.sha256((rules or "").encode("utf-8")).hexdigest()
     payload = [
-        (segment.get("index"), segment.get("source_hash"), segment.get("target"))
-        for segment in block
+        CACHE_VERSION,
+        rules_hash,
+        *[
+            (segment.get("index"), segment.get("source_hash"), segment.get("target"))
+            for segment in block
+        ],
     ]
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -344,34 +540,62 @@ def run_review(
     workers: int = DEFAULT_WORKERS,
     max_bisect_depth: int = DEFAULT_BISECT_DEPTH,
     max_segment_retries: int = DEFAULT_SEGMENT_RETRIES,
+    max_calls: int | None = DEFAULT_MAX_CALLS,
     measure=None,
     cache_dir: Path | None = None,
+    trace_dir: Path | None = None,
+    rules: str | None = None,
+    limit_blocks: int | None = None,
 ) -> list[dict[str, Any]]:
     """Plan and review blocks in parallel, returning results in block order.
 
     When ``cache_dir`` is given, a complete block result is written by block
-    identity and reused on a later run; invalid blocks are not cached.
+    identity and reused on a later run; invalid blocks are not cached. When
+    ``trace_dir`` is given, every block's recovery trace (including raw model
+    responses that failed validation) is written there for diagnosis.
     """
     if workers < 1:
         raise ValueError("workers must be at least 1")
     blocks = plan_blocks(segments, budget, measure)
+    if limit_blocks is not None:
+        if limit_blocks < 1:
+            raise ValueError("limit_blocks must be positive")
+        blocks = blocks[:limit_blocks]
     if not blocks:
         return []
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+    if trace_dir is not None:
+        trace_dir.mkdir(parents=True, exist_ok=True)
 
     def review_one(block: list[dict[str, Any]]) -> dict[str, Any]:
-        cache_path = cache_dir / f"{block_cache_key(block)}.json" if cache_dir is not None else None
+        key = block_cache_key(block, rules)
+        cache_path = cache_dir / f"{key}.json" if cache_dir is not None else None
         if cache_path is not None:
             cached = _read_cache(cache_path)
             if cached is not None:
                 return cached
+        events: list[dict[str, Any]] = []
         result = review_block(
             client,
             block,
             max_bisect_depth=max_bisect_depth,
             max_segment_retries=max_segment_retries,
+            max_calls=max_calls,
+            rules=rules,
+            trace=events.append,
         )
+        if trace_dir is not None:
+            trace_path = trace_dir / f"{key}.json"
+            trace_path.write_text(
+                json.dumps(
+                    {"segments": _indices(block), "events": events},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         if cache_path is not None and result.get("complete") is True:
             cache_path.write_text(
                 json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

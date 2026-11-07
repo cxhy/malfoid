@@ -13,6 +13,8 @@ import argparse
 import json
 import os
 import re
+import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ import review_blocks
 import review_evidence
 import review_reports
 import segment_state
+from profile_rules import section
 
 REVIEW_SYSTEM = (
     "You are a meticulous bilingual literary reviewer. Compare each numbered "
@@ -173,8 +176,12 @@ def review_book(
     workers: int = review_blocks.DEFAULT_WORKERS,
     max_bisect_depth: int = review_blocks.DEFAULT_BISECT_DEPTH,
     max_segment_retries: int = review_blocks.DEFAULT_SEGMENT_RETRIES,
+    max_calls: int | None = review_blocks.DEFAULT_MAX_CALLS,
+    limit_blocks: int | None = None,
     measure=None,
     cache_dir: Path | None = None,
+    trace_dir: Path | None = None,
+    report_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Review a whole book with one global block plan and write reports."""
     book = Path(book_dir)
@@ -183,6 +190,18 @@ def review_book(
         raise ValueError(f"book has no chapter state: {book}")
     segments, global_map = flatten_segments(chapters)
     blocks = review_blocks.plan_blocks(segments, budget, measure)
+    if limit_blocks is not None:
+        if limit_blocks < 1:
+            raise ValueError("limit_blocks must be positive")
+        blocks = blocks[:limit_blocks]
+    rules = "\n\n".join(
+        part
+        for part in (
+            section("proofread", work_dir=book),
+            section("book_review", work_dir=book),
+        )
+        if isinstance(part, str) and part.strip()
+    )
     reviews = review_blocks.run_review(
         client,
         segments,
@@ -190,8 +209,12 @@ def review_book(
         workers=workers,
         max_bisect_depth=max_bisect_depth,
         max_segment_retries=max_segment_retries,
+        max_calls=max_calls,
+        limit_blocks=limit_blocks,
         measure=measure,
         cache_dir=cache_dir,
+        trace_dir=trace_dir,
+        rules=rules,
     )
     if len(reviews) != len(blocks):
         raise RuntimeError("review block planning changed between plan and run")
@@ -199,7 +222,9 @@ def review_book(
     candidates, untraceable_candidates = map_candidates(candidates, global_map)
     local_reviews, untraceable_issues = map_reviews(reviews, global_map)
     evidence = verify_and_arbitrate(client, candidates, chapters)
-    summary = review_reports.write_review_reports(book, local_reviews, evidence_result=evidence)
+    summary = review_reports.write_review_reports(
+        book, local_reviews, evidence_result=evidence, report_dir=report_dir
+    )
     return {
         "book_dir": str(book),
         "advisory": True,
@@ -215,15 +240,41 @@ def review_book(
 class ReviewModelClient:
     """OpenAI-compatible client adapter for the local review provider."""
 
-    def __init__(self, model: str, effort: str, max_tokens: int) -> None:
+    def __init__(
+        self,
+        model: str,
+        effort: str,
+        max_tokens: int,
+        usage_log: Path | None = None,
+    ) -> None:
         from model_api import load_config
 
         self.base_url, self.api_key = load_config()
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens
+        self.usage_log = usage_log
+        self._lock = threading.Lock()
+
+    def _record(self, usage: dict[str, Any], prompt: str, elapsed: float) -> None:
+        if self.usage_log is None:
+            return
+        row = {
+            "ts": time.time(),
+            "model": self.model,
+            "effort": self.effort,
+            "max_tokens": self.max_tokens,
+            "prompt_chars": len(prompt),
+            "duration": round(elapsed, 2),
+            "usage": usage,
+        }
+        with self._lock:
+            self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.usage_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def __call__(self, prompt: str) -> str:
+        started = time.time()
         body = {
             "model": self.model,
             "messages": [
@@ -233,6 +284,7 @@ class ReviewModelClient:
             "temperature": 0.2,
             "max_tokens": self.max_tokens,
             "reasoning_effort": self.effort,
+            "response_format": {"type": "json_object"},
         }
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -242,8 +294,12 @@ class ReviewModelClient:
                 "Authorization": f"Bearer {self.api_key}",
             },
         )
-        with urllib.request.urlopen(request, timeout=600) as response:
+        timeout = int(os.environ.get("MALFOID_REVIEW_TIMEOUT", "900"))
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read())
+        usage = data.get("usage") or {}
+        usage["finish_reason"] = data["choices"][0].get("finish_reason")
+        self._record(usage, prompt, time.time() - started)
         return data["choices"][0]["message"]["content"]
 
 
@@ -254,7 +310,7 @@ def main(argv: list[str] | None = None) -> None:
         "--model",
         default=os.environ.get("MALFOID_MODEL", "DeepSeek-V4.1-Flash-1017-TensorFold-Zig"),
     )
-    parser.add_argument("--effort", default="low")
+    parser.add_argument("--effort", default="none")
     parser.add_argument("--max-tokens", type=int, default=24000)
     parser.add_argument("--budget", type=int, default=review_blocks.DEFAULT_REVIEW_BUDGET)
     parser.add_argument("--workers", type=int, default=review_blocks.DEFAULT_WORKERS)
@@ -262,14 +318,35 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--max-segment-retries", type=int, default=review_blocks.DEFAULT_SEGMENT_RETRIES
     )
+    parser.add_argument("--max-calls", type=int, default=review_blocks.DEFAULT_MAX_CALLS)
+    parser.add_argument(
+        "--limit-blocks",
+        type=int,
+        help="review only the first N blocks (prompt/effort smoke test)",
+    )
     parser.add_argument("--cache-dir", type=Path, help="review block cache directory")
+    parser.add_argument("--trace-dir", type=Path, help="review recovery trace directory")
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        help="write reports here instead of translation/review (smoke tests)",
+    )
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
 
     cache_dir = None
     if not args.no_cache:
         cache_dir = args.cache_dir or args.book_dir / "work_temp" / "review_cache"
-    client = ReviewModelClient(args.model, args.effort, args.max_tokens)
+    trace_dir = args.trace_dir or args.book_dir / "work_temp" / "review_traces"
+    report_dir = args.report_dir
+    if report_dir is None and args.limit_blocks:
+        report_dir = args.book_dir / "translation" / "review" / "smoke"
+    client = ReviewModelClient(
+        args.model,
+        args.effort,
+        args.max_tokens,
+        usage_log=args.book_dir / "work_temp" / "usage.jsonl",
+    )
     result = review_book(
         args.book_dir,
         client,
@@ -277,7 +354,11 @@ def main(argv: list[str] | None = None) -> None:
         workers=args.workers,
         max_bisect_depth=args.max_bisect_depth,
         max_segment_retries=args.max_segment_retries,
+        max_calls=args.max_calls,
+        limit_blocks=args.limit_blocks,
         cache_dir=cache_dir,
+        trace_dir=trace_dir,
+        report_dir=report_dir,
     )
     print(
         json.dumps(

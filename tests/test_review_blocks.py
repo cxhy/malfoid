@@ -445,3 +445,142 @@ def test_validate_review_output_rejects_invalid_optional_fields() -> None:
         )
         with pytest.raises(review_blocks.ReviewProtocolError, match=field):
             review_blocks.validate_review_output(payload, 1)
+
+
+def test_validate_review_output_accepts_boundary_only_json_repairs() -> None:
+    payload = {"issues": [], "reviewed_segments": 2, "complete": True}
+    strict = json.dumps(payload)
+    for candidate in (
+        f"```json\n{strict}\n```",
+        strict[:-1],
+        strict + "}",
+    ):
+        result = review_blocks.validate_review_output(candidate, 2)
+        assert result["reviewed_segments"] == 2
+        assert result["issues"] == []
+
+
+def test_validate_review_output_rejects_structural_json_repair() -> None:
+    broken = '{"issues": [{"segment_index": 0, "message": "问题"'
+    with pytest.raises(review_blocks.ReviewProtocolError, match="structural"):
+        review_blocks.validate_review_output(broken, 1)
+
+
+def test_run_review_bisects_to_singletons_by_default() -> None:
+    segments = [_segment(i, f"Segment {i}.", f"第{i}段。") for i in range(8)]
+    client = ReviewClient(
+        lambda indices: _payload(indices[:1]) if len(indices) > 1 else _payload(indices)
+    )
+    results = review_blocks.run_review(client, segments, budget=100, workers=1)
+    result = results[0]
+    assert result["complete"] is True
+    assert result["reviewed_segments"] == 8
+    assert result["stage"] == "bisected"
+    assert len(result["parts"]) == 8
+    assert client.call_count() == 15
+
+
+def test_run_review_persists_recovery_traces_with_raw_responses(tmp_path: Path) -> None:
+    segments = [_segment(0, "One.", "一。"), _segment(1, "Two.", "二。")]
+    client = ReviewClient(
+        lambda indices: _payload(indices[:1]) if len(indices) > 1 else _payload(indices)
+    )
+    trace_dir = tmp_path / "traces"
+    results = review_blocks.run_review(client, segments, budget=100, workers=1, trace_dir=trace_dir)
+    assert results[0]["complete"] is True
+    traces = list(trace_dir.glob("*.json"))
+    assert len(traces) == 1
+    data = json.loads(traces[0].read_text(encoding="utf-8"))
+    rejected = [event for event in data["events"] if event["event"] == "rejected"]
+    assert rejected
+    assert rejected[0]["raw"]
+    assert rejected[0]["error"]
+
+
+def test_validate_review_output_drops_no_issue_observations() -> None:
+    payload = json.dumps(
+        {
+            "issues": [
+                {
+                    "segment_index": 0,
+                    "message": "Source and target match; no issue.",
+                    "proposal": "No change needed.",
+                },
+                {
+                    "segment_index": 1,
+                    "message": "称呼漂移：同一人物前后不一致。",
+                    "proposal": "统一为德拉科妮娅。",
+                },
+            ],
+            "reviewed_segments": 2,
+            "complete": True,
+        },
+        ensure_ascii=False,
+    )
+    result = review_blocks.validate_review_output(payload, 2)
+    assert result["issues"] == [
+        {
+            "segment_index": 1,
+            "message": "称呼漂移：同一人物前后不一致。",
+            "proposal": "统一为德拉科妮娅。",
+        }
+    ]
+
+
+def test_build_review_prompt_includes_profile_rules() -> None:
+    prompt = review_blocks.build_review_prompt(
+        [_segment(0, "Draco waited.", "德拉科妮娅等待着。")],
+        rules="性转马尔福：全名德拉科妮娅·马尔福，代词她。",
+    )
+    assert "PROFILE RULES (must follow):" in prompt
+    assert "德拉科妮娅·马尔福" in prompt
+    assert "TARGET: 德拉科妮娅等待着。" in prompt
+
+
+def test_block_cache_key_changes_with_profile_rules() -> None:
+    block = [_segment(0, "One.", "一。")]
+    first = review_blocks.block_cache_key(block, rules="rule A")
+    second = review_blocks.block_cache_key(block, rules="rule B")
+    assert first != second
+    assert review_blocks.block_cache_key(block, rules="rule A") == first
+
+
+def test_run_review_respects_the_total_call_budget() -> None:
+    segments = [_segment(i, f"Segment {i}.", f"第{i}段。") for i in range(8)]
+    client = ReviewClient(lambda indices: _payload([]))
+    results = review_blocks.run_review(
+        client,
+        segments,
+        budget=100,
+        workers=1,
+        max_calls=3,
+        max_segment_retries=0,
+    )
+    result = results[0]
+    assert result["complete"] is False
+    assert client.call_count() <= 3
+    assert any("budget exhausted" in (part.get("error") or "") for part in result["parts"])
+
+
+def test_run_review_limit_blocks_reviews_only_the_prefix() -> None:
+    segments = [_segment(i, f"Segment {i}.", f"第{i}段。") for i in range(4)]
+    client = ReviewClient()
+    results = review_blocks.run_review(
+        client, segments, budget=4, measure=lambda text: 1, workers=1, limit_blocks=2
+    )
+    assert len(results) == 2
+    assert results[0]["segments"] == [0, 1]
+    assert results[1]["segments"] == [2, 3]
+
+
+def test_validate_review_output_keeps_real_issue_that_mentions_no_issue() -> None:
+    issue = {
+        "segment_index": 0,
+        "message": "The target adds 'no issue' as dialogue, which the source does not contain.",
+        "proposal": "Remove the added phrase.",
+    }
+    payload = json.dumps(
+        {"issues": [issue], "reviewed_segments": 1, "complete": True}, ensure_ascii=False
+    )
+    result = review_blocks.validate_review_output(payload, 1)
+    assert result["issues"] == [issue]
