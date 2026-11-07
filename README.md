@@ -59,12 +59,12 @@ pre-commit hooks, CI, and a documented artifact contract.
 
 ## Quick start
 
-Requirements: Python 3.10+, `beautifulsoup4`, and (for HTML delivery) Pandoc. Calibre is
-optional and only needed for EPUB/DOCX/PDF output.
+Requirements: uv, Python 3.13 (pinned in `.python-version`), and Pandoc (bundled by
+`pypandoc-binary`). Calibre is optional and only needed for EPUB/DOCX/PDF output.
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install beautifulsoup4 requests pypandoc-binary
+uv sync                 # runtime + dev dependencies from uv.lock
+uv sync --extra scrape  # also install source-fetching tools
 
 export MALFOID_BASE_URL="http://127.0.0.1:8000/v1"
 export MALFOID_API_KEY="your-key"
