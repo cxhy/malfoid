@@ -9,6 +9,7 @@ import model_api
 
 
 def test_make_client_writes_usage_log(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_api, "load_config", lambda: ("http://example.invalid", "key"))
     monkeypatch.setattr(
         model_api,
         "call",
@@ -24,7 +25,8 @@ def test_make_client_writes_usage_log(tmp_path: Path, monkeypatch) -> None:
     assert rows[0]["duration"] >= 0
 
 
-def test_make_client_without_usage_log_writes_nothing(tmp_path: Path) -> None:
+def test_make_client_without_usage_log_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(model_api, "load_config", lambda: ("http://example.invalid", "key"))
     client = model_api.make_client("model", "low", 1000)
     assert callable(client)
     assert list(tmp_path.iterdir()) == []

@@ -33,7 +33,7 @@ commands). Prefer small PRs with one behavioral change each.
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install beautifulsoup4 json-repair pytest ruff pre-commit
+.venv/bin/pip install beautifulsoup4 json-repair pypandoc-binary pytest ruff pre-commit
 
 ruff check tools tests
 ruff format --check tools tests
