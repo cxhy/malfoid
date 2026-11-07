@@ -55,20 +55,24 @@ def _block_label(block_index: int) -> str:
     return f"block-{block_index + 1:03d}"
 
 
-def block_json_path(book_dir: Path, block_index: int) -> Path:
-    return review_dir(book_dir) / f"{_block_label(block_index)}.json"
+def _report_dir(book_dir: Path, report_dir: Path | None) -> Path:
+    return Path(report_dir) if report_dir is not None else review_dir(book_dir)
 
 
-def block_markdown_path(book_dir: Path, block_index: int) -> Path:
-    return review_dir(book_dir) / f"{_block_label(block_index)}.md"
+def block_json_path(book_dir: Path, block_index: int, report_dir: Path | None = None) -> Path:
+    return _report_dir(book_dir, report_dir) / f"{_block_label(block_index)}.json"
 
 
-def summary_json_path(book_dir: Path) -> Path:
-    return review_dir(book_dir) / "summary.json"
+def block_markdown_path(book_dir: Path, block_index: int, report_dir: Path | None = None) -> Path:
+    return _report_dir(book_dir, report_dir) / f"{_block_label(block_index)}.md"
 
 
-def summary_markdown_path(book_dir: Path) -> Path:
-    return review_dir(book_dir) / "summary.md"
+def summary_json_path(book_dir: Path, report_dir: Path | None = None) -> Path:
+    return _report_dir(book_dir, report_dir) / "summary.json"
+
+
+def summary_markdown_path(book_dir: Path, report_dir: Path | None = None) -> Path:
+    return _report_dir(book_dir, report_dir) / "summary.md"
 
 
 def _issues(review: dict[str, Any]) -> list[dict[str, Any]]:
@@ -394,7 +398,9 @@ def render_block_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_block_report(book_dir: Path, report: dict[str, Any]) -> tuple[Path, Path]:
+def write_block_report(
+    book_dir: Path, report: dict[str, Any], report_dir: Path | None = None
+) -> tuple[Path, Path]:
     """Write one block report as JSON and Markdown; return both paths."""
     if not isinstance(report, dict):
         raise ValueError("report must be a dict")
@@ -402,8 +408,8 @@ def write_block_report(book_dir: Path, report: dict[str, Any]) -> tuple[Path, Pa
     if block_index < 0:
         raise ValueError("report block index must not be negative")
 
-    json_path = block_json_path(book_dir, block_index)
-    markdown_path = block_markdown_path(book_dir, block_index)
+    json_path = block_json_path(book_dir, block_index, report_dir)
+    markdown_path = block_markdown_path(book_dir, block_index, report_dir)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     markdown_path.write_text(render_block_markdown(report), encoding="utf-8")
@@ -525,6 +531,7 @@ def write_review_reports(
     reviews: list[dict[str, Any]],
     *,
     evidence_result: dict[str, Any] | None = None,
+    report_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Write one JSON/Markdown report per block plus JSON/Markdown summaries.
 
@@ -544,14 +551,16 @@ def write_review_reports(
             evidence=evidence,
             arbitrations=arbitrations,
         )
-        write_block_report(book_dir, report)
+        write_block_report(book_dir, report, report_dir)
         reports.append(report)
 
     summary = build_summary(reports)
-    summary_json_path(book_dir).write_text(
+    summary_json_path(book_dir, report_dir).write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    summary_markdown_path(book_dir).write_text(render_summary_markdown(summary), encoding="utf-8")
+    summary_markdown_path(book_dir, report_dir).write_text(
+        render_summary_markdown(summary), encoding="utf-8"
+    )
     return summary
 
 

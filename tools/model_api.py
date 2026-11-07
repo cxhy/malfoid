@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -48,7 +50,8 @@ def call(
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    timeout = int(os.environ.get("MALFOID_TIMEOUT", "900"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     text = payload["choices"][0]["message"].get("content") or ""
     usage = payload.get("usage") or {}
@@ -56,11 +59,36 @@ def call(
     return text, usage
 
 
-def make_client(model: str, effort: str, max_tokens: int):
+def make_client(
+    model: str,
+    effort: str,
+    max_tokens: int,
+    usage_log: Path | None = None,
+):
     base_url, api_key = load_config()
+    lock = threading.Lock()
+
+    def record(usage: dict, prompt: str, elapsed: float) -> None:
+        if usage_log is None:
+            return
+        row = {
+            "ts": time.time(),
+            "model": model,
+            "effort": effort,
+            "max_tokens": max_tokens,
+            "prompt_chars": len(prompt),
+            "duration": round(elapsed, 2),
+            "usage": usage,
+        }
+        with lock:
+            usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with usage_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def client(prompt: str) -> str:
-        text, _ = call(base_url, api_key, model, prompt, effort, max_tokens)
+        started = time.time()
+        text, usage = call(base_url, api_key, model, prompt, effort, max_tokens)
+        record(usage, prompt, time.time() - started)
         return text
 
     return client

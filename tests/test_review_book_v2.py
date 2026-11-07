@@ -148,3 +148,61 @@ def test_flatten_segments_assigns_global_indices_and_local_positions() -> None:
     assert [segment["chapter"] for segment in segments] == [1, 1, 2]
     assert [segment["local_index"] for segment in segments] == [0, 1, 0]
     assert global_map == {0: (1, 0), 1: (1, 1), 2: (2, 0)}
+
+
+def test_review_model_client_requests_json_mode(monkeypatch, tmp_path: Path) -> None:
+    import model_api
+
+    monkeypatch.delenv("MALFOID_REVIEW_TIMEOUT", raising=False)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 3},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(model_api, "load_config", lambda: ("http://example.invalid/v1", "key"))
+    monkeypatch.setattr(review_book_v2.urllib.request, "urlopen", fake_urlopen)
+    log = tmp_path / "usage.jsonl"
+    client = review_book_v2.ReviewModelClient("model", "low", 1000, usage_log=log)
+    client("prompt")
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert captured["timeout"] == 900
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["usage"]["total_tokens"] == 3
+    assert rows[0]["usage"]["finish_reason"] == "stop"
+
+
+def test_review_book_limit_blocks_writes_to_a_separate_report_dir(tmp_path: Path) -> None:
+    book = _write_book(
+        tmp_path,
+        [_chapter(1, [_segment(0, "Draco waited.", "德拉科等待着。")])],
+    )
+    report_dir = tmp_path / "smoke"
+    result = review_book_v2.review_book(
+        book,
+        BookReviewClient(),
+        budget=100,
+        limit_blocks=1,
+        report_dir=report_dir,
+    )
+    assert len(result["blocks"]) == 1
+    assert (report_dir / "summary.json").is_file()
+    assert (report_dir / "block-001.json").is_file()
+    assert not (book / "translation" / "review" / "summary.json").exists()
