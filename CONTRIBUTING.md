@@ -32,14 +32,18 @@ commands). Prefer small PRs with one behavioral change each.
 ## Development workflow
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install beautifulsoup4 json-repair pypandoc-binary pytest ruff pre-commit
+uv sync --extra scrape
 
-ruff check tools tests
-ruff format --check tools tests
-pytest
-pre-commit install
+uv run ruff check tools tests
+uv run ruff format --check tools tests
+uv run pytest
+uv run pre-commit install
 ```
+
+Python is pinned by `.python-version` and dependencies by `uv.lock`; `uv sync`
+creates the project `.venv`. Use `uv run <command>` so the locked environment is
+used consistently. The `scrape` extra keeps the optional source-fetching tools
+(`fanficfare`, `cloudscraper`, `curl-cffi`, `gdown`, `html2text`).
 
 `main` is the only long-lived branch. Work on short-lived `feat/*`, `fix/*`, `docs/*` or
 `chore/*` branches and open a PR against `main`. Keep the tree green: lint, format and
