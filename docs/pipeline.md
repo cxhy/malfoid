@@ -276,8 +276,11 @@ Glossary resolution is global → series → book. The global canonical table wi
 on canonical targets unless a series term sets `override_global`; series-only
 terms are added on top. Book-local terms supplement the series master and merge
 back with `sync_glossary.py --merge-back`, which never edits the global table.
-Translation loads the merged global + series + book glossary; polish injects the
-same relevant terms per batch. Review and fix load the same glossary plus
+Polish loads the configured skill (`fiction-humanizer-zh`) in `轻改` mode and
+appends the profile's `polish.md` last as a highest-priority override, so skill
+upgrades propagate without project edits while the light-edit boundary stays
+explicit. Translation loads the merged global + series + book glossary; polish
+injects the same relevant terms per batch. Review and fix load the same glossary plus
 unambiguous English→Chinese rows from the book and series story bibles; the
 glossary always wins on conflicts. `sync_glossary.py` refreshes a book copy, and
 ingest/prescan also synchronize it. Glossary entries may carry

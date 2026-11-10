@@ -31,7 +31,7 @@ works/<series-id>-<slug>/          # 一个系列一个根目录
 2. **术语表**：三层——全局表（`glossary/hp.json`，只收原著 HP 正典译名和性转马尔福统一规则）、系列主表（本系列所有书共用，可补系列特有词，覆盖正典须标 `override_global`）、书副本（全局 + 系列 + 本书本地补充）。书内新词先写副本，交付前用 `sync_glossary.py --merge-back` 回并系列主表，不回并全局表；翻译时只注入当前批实际出现的术语。
 3. **预扫描**：整本书源齐了再做；`prescan_book.py` 按章并行（默认 2），生成 digest、style brief、synopsis、book story bible，并合并进系列 bible。
 4. **翻译**：`translate_book_v2.py` 按 token 预算打包，等长 JSON 数组，校验数量/完整/非空；协议失败重试 2 次，最后逐段回退，不静默丢段。
-5. **润色**：翻译入口默认接着润色，固定轻改；只改句子、节奏、对白和翻译腔，段落顺序不变，不新增原文没有的动作、感官细节或心理活动。
+5. **润色**：翻译入口默认接着润色，固定轻改；加载 `fiction-humanizer-zh` skill 的轻改模式，项目 `polish.md` 作为最高优先级覆盖；只改句子、节奏、对白和翻译腔，段落顺序不变，不新增原文没有的动作、感官细节或心理活动。
 6. **审查**：`review_book_v2.py` 按全书连续块审查；结构化 JSON + JSON mode，非法输出递归二分到单段，单段有限重试，总调用有预算；原始失败响应落 `work_temp/review_traces/`；候选经证据核对，矛盾做冲突仲裁；只出建议，不改正文。审查注入 profile 规则，避免把 AU 改动“纠正”回原著。v2 审查同时承担忠实度（漏译/增译/误译/语义反转）和跨章一致性；证据核对会读取术语表，`terminology` 候选精确命中 `forbidden_targets` 时确定性确认，不再被证据层自我否决。
 7. **交付**：`book_delivery.py` 先自动把书内新词回并系列主表并同步全系列（不回并全局表；有冲突默认拒绝交付，`--allow-glossary-conflicts` 仅排障），再从段落状态渲染完整 `translation/<Title>.md`，用 `build_html.py` + `template.html` 生成单份 HTML；Markdown 超过 80,000 字符时，额外按章边界均匀切出 `translation/<Title> - Part N.md`。
 

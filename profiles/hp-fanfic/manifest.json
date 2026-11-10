@@ -29,5 +29,6 @@
     "学院/血统/身份",
     "关系与称呼",
     "咒语与专名"
-  ]
+  ],
+  "skills": {"polish": "fiction-humanizer-zh"}
 }

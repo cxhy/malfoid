@@ -25,6 +25,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = ROOT / "profiles"
+SKILLS = ROOT / ".pi" / "skills"
 DEFAULT_PROFILE = "hp-fanfic"
 
 
@@ -80,6 +81,54 @@ def compose(base: str, key: str, name: str | None = None, work_dir: Path | None 
     """Append a profile section to an existing system/rules prompt."""
     extra = section(key, name, work_dir)
     return f"{base.rstrip()}\n\n{extra}\n"
+
+
+def skill_name(key: str, name: str | None = None, work_dir: Path | None = None) -> str | None:
+    """Return the skill configured for a profile section, if any."""
+    manifest = load_profile(name, work_dir)
+    skills = manifest.get("skills")
+    if not isinstance(skills, dict):
+        return None
+    value = skills.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def skill_text(name: str) -> str:
+    """Read a vendored skill's SKILL.md without its YAML frontmatter."""
+    path = SKILLS / name / "SKILL.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"skill file missing: {path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2].strip()
+    return text
+
+
+def compose_skill(skill: str, project_rules: str, mode: str = "轻改") -> str:
+    """Compose a skill in a fixed mode, with project rules as the final override."""
+    text = skill_text(skill)
+    header = (
+        f"使用 {skill} skill。模式：{mode}。只执行 {mode} 模式；"
+        "不执行精修、重写、续写、审稿等其他模式。"
+    )
+    overrides = "PROJECT OVERRIDES（最高优先级；与 skill 冲突时以项目规则为准）："
+    return "\n\n".join([header, text, overrides, project_rules.rstrip()])
+
+
+def section_with_skill(
+    key: str,
+    mode: str = "轻改",
+    name: str | None = None,
+    work_dir: Path | None = None,
+) -> str:
+    """Read a profile section and prepend its configured skill in a fixed mode."""
+    project_rules = section(key, name, work_dir)
+    configured = skill_name(key, name, work_dir)
+    if not configured:
+        return project_rules
+    return compose_skill(configured, project_rules, mode)
 
 
 def forbidden_names(name: str | None = None, work_dir: Path | None = None) -> list[str]:

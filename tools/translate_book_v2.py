@@ -24,7 +24,7 @@ import batch_translate
 import book_state
 import polish_batch
 import segment_state
-from profile_rules import section
+from profile_rules import section, section_with_skill
 
 
 class TimeBudgetExceeded(RuntimeError):
@@ -93,7 +93,7 @@ def translate_book(
     """
     terms = load_glossary_terms(book_dir)
     translation_rules = section("translation", work_dir=book_dir)
-    polish_rules = section("polish", work_dir=book_dir)
+    polish_rules = section_with_skill("polish", mode="轻改", work_dir=book_dir)
     translated = polished = 0
     failures: list[dict[str, Any]] = []
     context = ""

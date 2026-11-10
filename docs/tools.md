@@ -82,7 +82,7 @@ the default `hp-fanfic`.
 |---|---|
 | `ingest_book_v2.py` | create a series/book and ingest source files into chapter state; records `covered_chapters` for range markers |
 | `txt_convert.py` | convert chapter-numbered TXT into Markdown + `meta.json` |
-| `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary |
+| `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary and the configured polish skill in light-edit mode |
 | `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
 | `book_state.py` | series root, book sub-work, and global/series/book glossary resolution |
 | `sync_glossary.py` | merge global + series into book copies; `--merge-back` merges book-local terms into the series master (never the global table) |
@@ -93,7 +93,7 @@ the default `hp-fanfic`.
 | `preflight_model.py` | probe endpoint concurrency and recommend a worker count; review uses it when `--workers` is omitted |
 | `model_client.py` | callable/object client adapter |
 | `batch_translate.py` | translation batch protocol |
-| `polish_batch.py` | polish batch protocol with relevant glossary injection |
+| `polish_batch.py` | polish batch protocol with relevant glossary injection and skill light-edit rules |
 | `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
@@ -115,7 +115,7 @@ works; v2 review artifacts live under `translation/review/`.
 The pipeline uses three MIT-licensed agent skills under `.pi/skills/`:
 
 - `translate-book` — chunking, glossary scripts and merge/build helpers;
-- `fiction-humanizer-zh` — Chinese fiction polish rules;
-- `humanizer-zh` — general Chinese prose polish rules.
+- `fiction-humanizer-zh` — loaded at runtime for v2 polish in `轻改` mode; the profile's `polish.md` is appended last as a highest-priority override;
+- `humanizer-zh` — reference only; not used by the automated pipeline.
 
 See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
