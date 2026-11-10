@@ -15,9 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import book_state
 import build_html
 import segment_state
 import verify_book
+
+
+class GlossaryConflictError(RuntimeError):
+    """Raised when book-local terms conflict with the series or global glossary."""
+
+    def __init__(self, merge: dict[str, Any]) -> None:
+        self.merge = merge
+        super().__init__("glossary merge conflicts")
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,7 @@ class DeliveryResult:
     markdown: Path
     html: Path
     markdown_parts: list[Path]
+    glossary_merge: dict[str, Any] | None = None
 
 
 def _read_meta(book_dir: Path) -> dict[str, Any]:
@@ -39,6 +49,53 @@ def _read_meta(book_dir: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _book_number(book_dir: Path) -> int | None:
+    meta = _read_meta(book_dir)
+    number = meta.get("book_number")
+    if isinstance(number, int):
+        return number
+    name = Path(book_dir).name
+    if name.startswith("book-") and name[5:].isdigit():
+        return int(name[5:])
+    return None
+
+
+def _sync_series_glossary(root: Path) -> int:
+    series = book_state.load_series(root)
+    synced = 0
+    for entry in series.get("books") or []:
+        number = entry.get("number")
+        if not isinstance(number, int):
+            continue
+        try:
+            book = book_state.resolve_book(root, number)
+        except FileNotFoundError:
+            continue
+        book_state.sync_glossary(book)
+        synced += 1
+    return synced
+
+
+def _merge_glossary(book_dir: Path) -> dict[str, Any] | None:
+    """Merge book-local terms into the series master, then sync all books.
+
+    Returns ``None`` for legacy flat works. The global table is never edited.
+    """
+    book = Path(book_dir)
+    root = book.parent.parent
+    if not book_state.is_series_root(root):
+        return None
+    number = _book_number(book)
+    if number is None:
+        return {"error": "cannot determine book number"}
+    try:
+        merge = book_state.merge_glossary_back(root, number)
+    except FileNotFoundError as exc:
+        return {"error": str(exc)}
+    synced = _sync_series_glossary(root)
+    return {"merge": merge, "synced_books": synced}
 
 
 def _ensure_meta(book_dir: Path, title: str, author: str) -> None:
@@ -152,6 +209,8 @@ def write_delivery(
     author: str | None = None,
     split_chars: int | None = 80000,
     verify: bool = True,
+    merge_glossary: bool = True,
+    strict_glossary: bool = True,
 ) -> DeliveryResult:
     """Render Markdown and template HTML under ``translation/<title>``.
 
@@ -161,6 +220,12 @@ def write_delivery(
     is an error: parts never split inside a chapter.
     """
     book = Path(book_dir)
+    glossary_merge = None
+    if merge_glossary:
+        glossary_merge = _merge_glossary(book)
+        conflicts = (glossary_merge or {}).get("merge", {}).get("conflicts") or []
+        if conflicts and strict_glossary:
+            raise GlossaryConflictError(glossary_merge)
     if verify:
         report = verify_book.verify_book(book)
         if not report["ok"]:
@@ -191,6 +256,7 @@ def write_delivery(
         markdown=markdown_path,
         html=html_path,
         markdown_parts=parts,
+        glossary_merge=glossary_merge,
     )
 
 
@@ -202,6 +268,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--split-md-chars", type=int, default=80000)
     parser.add_argument("--no-split-md", action="store_true")
     parser.add_argument("--skip-verify", action="store_true")
+    parser.add_argument(
+        "--skip-glossary-merge",
+        action="store_true",
+        help="do not merge book-local terms into the series master before delivery",
+    )
+    parser.add_argument(
+        "--allow-glossary-conflicts",
+        action="store_true",
+        help="deliver even when book-local terms conflict with the series/global glossary",
+    )
     args = parser.parse_args(argv)
     split_chars = None if args.no_split_md else args.split_md_chars
     try:
@@ -211,10 +287,20 @@ def main(argv: list[str] | None = None) -> None:
             author=args.author,
             split_chars=split_chars,
             verify=not args.skip_verify,
+            merge_glossary=not args.skip_glossary_merge,
+            strict_glossary=not args.allow_glossary_conflicts,
         )
+    except GlossaryConflictError as exc:
+        print(json.dumps(exc.merge, ensure_ascii=False, indent=2))
+        raise SystemExit(1)
     except verify_book.DeliveryVerificationError as exc:
         print(json.dumps(exc.report, ensure_ascii=False, indent=2))
         raise SystemExit(1)
+    if result.glossary_merge is not None:
+        print(
+            "glossary merge: "
+            + json.dumps(result.glossary_merge, ensure_ascii=False)
+        )
     print(f"markdown: {result.markdown}")
     print(f"html: {result.html}")
     for path in result.markdown_parts:

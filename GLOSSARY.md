@@ -60,7 +60,7 @@ _Avoid_: 摘要、大纲
 _Avoid_: 全局术语表
 
 **书副本（book glossary）**：
-每本书 `work_temp/glossary.json` 的工作副本，由全局表 + 系列主表 + 本书本地补充合并而成；书内新词先写副本，交付前用 `sync_glossary.py --merge-back` 回并系列主表（不写全局表）。
+每本书 `work_temp/glossary.json` 的工作副本，由全局表 + 系列主表 + 本书本地补充合并而成；书内新词先写副本，交付时自动回并系列主表并同步全系列（不写全局表）；也可手动用 `sync_glossary.py --merge-back`。
 _Avoid_: 局部术语表
 
 **证据（evidence）**：

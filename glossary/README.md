@@ -13,8 +13,9 @@ Rules:
 - Series-specific, AU, original-character and source-specific terms belong in
   `works/<series>/glossary.json` (the series master).
 - Book-local additions belong in `works/<series>/books/book-NN/work_temp/glossary.json`;
-  `sync_glossary.py --merge-back` merges them into the series master, never into
-  this global file.
+  delivery merges them into the series master automatically, and
+  `sync_glossary.py --merge-back` does the same manually. Neither path writes this
+  global file.
 - A series may override a canonical global target only with
   `"override_global": true` in the series term. Without that flag, the global
   target wins and the disagreement is reported as a conflict.

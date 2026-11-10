@@ -99,7 +99,7 @@ the default `hp-fanfic`.
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
 | `review_book_v2.py` | whole-book review runner (glossary + story-bible terms in blocks, category/severity issues, evidence, reports, `--limit-blocks`) |
 | `fix_review_issues.py` | apply actionable review categories at high/medium severity; deterministic glossary-variant violations bypass the severity gate; skips segments edited after review; `--dry-run` is plan-only; failures go to `work_temp/fix_review/manual_queue.md` |
-| `book_delivery.py` | render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first |
+| `book_delivery.py` | auto-merge book glossary into the series master and sync the series; render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first |
 | `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, headings |
 | `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
 | `review_evidence.py` | verify review candidates with glossary context and deterministic terminology confirmation; arbitrate conflicts |

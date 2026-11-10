@@ -289,7 +289,10 @@ metrics, and writes a Book 1 GO/NO-GO acceptance record. `review_book_v2.py` is 
 generic whole-book review runner. Both write only under `translation/review/` and
 stay advisory. `book_delivery.py` renders translated segment state to
 `translation/<title>.md` and `translation/<title>.html` through `build_html.py`.
-The full Markdown and single HTML are always kept. When the Markdown exceeds
+Before verification it merges book-local glossary terms into the series master and
+synchronizes every book in the series; conflicts with the series/global glossary
+block delivery unless `--allow-glossary-conflicts` is passed. The full Markdown
+and single HTML are always kept. When the Markdown exceeds
 `--split-md-chars` (default 80,000 characters), delivery also writes balanced
 chapter-boundary parts as `translation/<title> - Part N.md`; parts never split
 inside a chapter, and an oversized chapter raises an error. Use `--no-split-md`

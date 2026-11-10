@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import book_delivery
+import book_state
 import pytest
 import segment_state
 import verify_book
@@ -169,3 +170,119 @@ def test_write_delivery_can_skip_verification(tmp_path: Path) -> None:
     segment_state.save_chapter(path, chapter)
     result = book_delivery.write_delivery(book, verify=False)
     assert result.markdown.is_file()
+
+
+def _write_series_book(tmp_path: Path) -> tuple[Path, Path, Path]:
+    root = tmp_path / "workspace" / "series"
+    book_state.create_series(
+        root,
+        series_id="delivery-test",
+        title="Delivery Test",
+        author="Tester",
+        books=[
+            {"number": 1, "title": "Book 1"},
+            {"number": 2, "title": "Book 2"},
+        ],
+    )
+    first = book_state.resolve_book(root, 1)
+    second = book_state.resolve_book(root, 2)
+    meta = {"title": "Book One", "author": "Test Author", "book_number": 1}
+    (first / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    chapter = {
+        "chapter": 1,
+        "title": "Chapter One",
+        "heading_level": 1,
+        "segments": [
+            _segment(0, "Chapter One", "第一章", kind="heading"),
+            _segment(1, "Local term waited.", "本地词等待着。"),
+        ],
+    }
+    segment_state.save_chapter(segment_state.chapter_path(first, 1), chapter)
+    return root, first, second
+
+
+def _term(term_id: str, target: str) -> dict:
+    return {
+        "id": term_id,
+        "source": term_id,
+        "target": target,
+        "aliases": [],
+        "category": "term",
+        "gender": "unknown",
+        "confidence": "high",
+        "frequency": 0,
+        "evidence_refs": [],
+        "notes": "",
+    }
+
+
+def _glossary(*terms: dict) -> dict:
+    return {
+        "version": 2,
+        "high_frequency_top_n": 20,
+        "applied_meta_hashes": {},
+        "terms": list(terms),
+    }
+
+
+def test_write_delivery_merges_book_terms_back_and_syncs_series(tmp_path: Path) -> None:
+    root, first, second = _write_series_book(tmp_path)
+    (root / "glossary.json").write_text(
+        json.dumps(_glossary(_term("Existing", "已有")), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (first / "work_temp" / "glossary.json").write_text(
+        json.dumps(
+            _glossary(_term("Existing", "已有"), _term("Local Term", "本地词")),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = book_delivery.write_delivery(first)
+
+    assert result.glossary_merge is not None
+    assert result.glossary_merge["merge"]["added"] == 1
+    series = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    assert "Local Term" in {term["id"] for term in series["terms"]}
+    synced = json.loads(
+        (second / "work_temp" / "glossary.json").read_text(encoding="utf-8")
+    )
+    assert "Local Term" in {term["id"] for term in synced["terms"]}
+
+
+def test_write_delivery_rejects_glossary_conflicts_by_default(tmp_path: Path) -> None:
+    root, first, _ = _write_series_book(tmp_path)
+    (root / "glossary.json").write_text(
+        json.dumps(_glossary(_term("Conflict", "系列译")), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (first / "work_temp" / "glossary.json").write_text(
+        json.dumps(_glossary(_term("Conflict", "书译")), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(book_delivery.GlossaryConflictError) as caught:
+        book_delivery.write_delivery(first)
+
+    assert caught.value.merge["merge"]["conflicts"] == [
+        {"id": "Conflict", "master": "系列译", "book": "书译"}
+    ]
+    assert not (first / "translation" / "Book One.md").exists()
+
+
+def test_write_delivery_can_allow_glossary_conflicts(tmp_path: Path) -> None:
+    root, first, _ = _write_series_book(tmp_path)
+    (root / "glossary.json").write_text(
+        json.dumps(_glossary(_term("Conflict", "系列译")), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (first / "work_temp" / "glossary.json").write_text(
+        json.dumps(_glossary(_term("Conflict", "书译")), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = book_delivery.write_delivery(first, strict_glossary=False)
+
+    assert result.markdown.is_file()
+    assert result.glossary_merge["merge"]["conflicts"]
