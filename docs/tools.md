@@ -14,15 +14,18 @@ virtualenv; most accept `--help`.
 | `ao3_convert.py` | AO3 "Download → HTML" export → `source/work.md` + `meta.json` |
 | `fic_convert.py` | FicHub HTML export (`div#chap_N`) → same layout |
 | `pdf_convert.py` | chapter-numbered PDF → Markdown, paragraphs rebuilt from indentation |
+| `sb_convert.py` | SpaceBattles plain-text scrape (`第 N 章` headers) → per-book Markdown chapters + manifest |
 
 ## Glossary and context (v1; export_glossary remains active)
+
+Global canonical glossary: `glossary/hp.json` (tracked; canonical HP terms plus the gender-swapped Malfoy rule). Series master: `works/<series>/glossary.json`. Book working copy: `works/<series>/books/book-NN/work_temp/glossary.json`.
 
 | Tool | Purpose |
 |---|---|
 | `build_prescan.py` | resumable chapter digests, style brief, synopsis and HP story bible |
 | `make_prompt_ctx.py` | per-chunk prompt context: style brief, story bible, synopsis, digest, glossary, rolling context, neighbour excerpts |
 | `prompt_profile.py` | load the active HP fanfic profile and its per-stage rule sections |
-| `export_glossary.py` | human-readable `glossary.md` from `glossary.json` |
+| `export_glossary.py` | human-readable `glossary.md` from the effective v2 glossary (global + series + book) |
 | `qa_translation.py` | residue and structure checks over translated chunks |
 
 ## Translation (v1, archived)
@@ -77,27 +80,29 @@ the default `hp-fanfic`.
 
 | Tool | Purpose |
 |---|---|
-| `ingest_book_v2.py` | create a series/book and ingest source files into chapter state |
+| `ingest_book_v2.py` | create a series/book and ingest source files into chapter state; records `covered_chapters` for range markers |
 | `txt_convert.py` | convert chapter-numbered TXT into Markdown + `meta.json` |
-| `translate_book_v2.py` | translate pending segments and polish them end-to-end |
+| `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary |
 | `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
-| `book_state.py` | series root, book sub-work and glossary master operations |
-| `segment_state.py` | source parsing, chapter/segment state, Markdown rendering |
+| `book_state.py` | series root, book sub-work, and global/series/book glossary resolution |
+| `sync_glossary.py` | merge global + series into book copies; `--merge-back` merges book-local terms into the series master (never the global table) |
+| `segment_state.py` | source parsing, chapter/segment state, Markdown rendering, deterministic chapter headings |
 | `token_budget.py` | shared deterministic token estimator |
 | `model_api.py` | local OpenAI-compatible model endpoint |
 | `profile_rules.py` | resolve the active profile and compose stage rules |
-| `preflight_model.py` | probe endpoint concurrency and recommend a worker count |
+| `preflight_model.py` | probe endpoint concurrency and recommend a worker count; review uses it when `--workers` is omitted |
 | `model_client.py` | callable/object client adapter |
 | `batch_translate.py` | translation batch protocol |
-| `polish_batch.py` | polish batch protocol |
+| `polish_batch.py` | polish batch protocol with relevant glossary injection |
 | `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
-| `review_book_v2.py` | whole-book review runner (blocks, evidence, reports, `--limit-blocks`) |
-| `fix_review_issues.py` | apply confirmed review suggestions to segment targets, resumable |
-| `book_delivery.py` | render full Markdown + HTML; split Markdown into balanced `Part N` files |
+| `review_book_v2.py` | whole-book review runner (glossary + story-bible terms in blocks, category/severity issues, evidence, reports, `--limit-blocks`) |
+| `fix_review_issues.py` | apply actionable review categories at high/medium severity; deterministic glossary-variant violations bypass the severity gate; skips segments edited after review; `--dry-run` is plan-only; failures go to `work_temp/fix_review/manual_queue.md` |
+| `book_delivery.py` | render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first |
+| `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, headings |
 | `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
-| `review_evidence.py` | verify review candidates and arbitrate conflicts |
+| `review_evidence.py` | verify review candidates with glossary context and deterministic terminology confirmation; arbitrate conflicts |
 | `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
 
 Migration path: run `preview_pipeline.py` on the legacy work with the chunk ids that

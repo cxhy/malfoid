@@ -268,3 +268,69 @@ def test_render_markdown_translated_mode_uses_targets_and_falls_back_to_source()
     assert segment_state.render_markdown(chapter, translated=True) == (
         "# 第一章\n\n第一段。第二段。\n\nUntranslated source."
     )
+
+
+def test_display_chapter_heading_parses_ranges_and_decimals() -> None:
+    assert segment_state.display_chapter_heading({"title": "Ch 7"}) == "第七章"
+    assert segment_state.display_chapter_heading({"title": "Ch18-19-20"}) == "第十八至二十章"
+    assert segment_state.display_chapter_heading({"title": "Ch 10-10.5"}) == "第十至十点五章"
+    assert segment_state.display_chapter_heading({"title": "Ch 9 (Combination)"}) == "第九章"
+    assert segment_state.display_chapter_heading({"title": "Prologue"}) is None
+
+
+def test_render_book_translated_uses_deterministic_headings(tmp_path: Path) -> None:
+    book = tmp_path / "book"
+    chapter = {
+        "chapter": 1,
+        "title": "Ch1-6",
+        "heading_level": 1,
+        "segments": [
+            {
+                "index": 0,
+                "kind": "heading",
+                "source": "Ch1-6",
+                "source_hash": "h0",
+                "target": "第1章-6",
+                "level": 1,
+            },
+            {
+                "index": 1,
+                "kind": "text",
+                "source": "Text.",
+                "source_hash": "h1",
+                "target": "译文。",
+            },
+        ],
+    }
+    segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
+    rendered = segment_state.render_book(book, translated=True)
+    assert rendered.startswith("# 第一至六章")
+    assert "第1章-6" not in rendered
+
+
+def test_render_book_keeps_translated_heading_for_custom_titles(tmp_path: Path) -> None:
+    book = tmp_path / "book"
+    chapter = {
+        "chapter": 1,
+        "title": "Prologue",
+        "heading_level": 1,
+        "segments": [
+            {
+                "index": 0,
+                "kind": "heading",
+                "source": "Prologue",
+                "source_hash": "h0",
+                "target": "序章",
+                "level": 1,
+            },
+            {
+                "index": 1,
+                "kind": "text",
+                "source": "Text.",
+                "source_hash": "h1",
+                "target": "译文。",
+            },
+        ],
+    }
+    segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
+    assert segment_state.render_book(book, translated=True).startswith("# 序章")

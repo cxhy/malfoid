@@ -398,3 +398,30 @@ def test_block_verdict_matches_the_issue_chapter_when_present() -> None:
     evidence = [_verified(index=1, status="rejected", message="称呼漂移。")]
     evidence[0]["candidate"]["chapter"] = 1
     assert review_reports.block_verdict(review, evidence=evidence) == "FAIL"
+
+
+def test_summary_lists_style_issues_separately(tmp_path: Path) -> None:
+    style = _issue(0, message="句子节奏偏慢。", proposal="调整节奏。")
+    style["category"] = "style"
+    style["severity"] = "low"
+    report = review_reports.build_block_report(
+        _review(issues=[style]), block_index=0, evidence=None, arbitrations=None
+    )
+    summary = review_reports.build_summary([report])
+    assert len(summary["style_issues"]) == 1
+    text = review_reports.render_summary_markdown(summary)
+    assert "风格建议" in text
+    assert "句子节奏偏慢" in text
+
+
+def test_block_markdown_shows_category_and_severity() -> None:
+    issue = _issue(0, message="漏译一句。", proposal="补全。")
+    issue["category"] = "omission"
+    issue["severity"] = "high"
+    report = review_reports.build_block_report(
+        _review(issues=[issue]), block_index=0, evidence=None, arbitrations=None
+    )
+    text = review_reports.render_block_markdown(report)
+    assert "| 类别 |" in text
+    assert "omission" in text
+    assert "high" in text

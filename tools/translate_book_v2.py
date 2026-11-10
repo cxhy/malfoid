@@ -21,34 +21,33 @@ from pathlib import Path
 from typing import Any
 
 import batch_translate
+import book_state
 import polish_batch
 import segment_state
 from profile_rules import section
 
 
+class TimeBudgetExceeded(RuntimeError):
+    """Raised between saved batches when a translate run reaches its time budget."""
+
+
 def load_glossary_terms(book_dir: Path) -> list[dict[str, Any]]:
-    """Load the book glossary, falling back to the series master."""
-    candidates = [book_dir / "work_temp" / "glossary.json"]
-    series_root = book_dir.parent.parent
-    candidates.append(series_root / "glossary.json")
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        terms = data.get("terms") if isinstance(data, dict) else None
-        return [term for term in terms or [] if isinstance(term, dict)]
-    return []
+    """Load the merged series + book glossary for translation."""
+    return book_state.load_glossary_terms(book_dir)
 
 
-def _chapter_paths(book_dir: Path, chapters: list[int] | None = None) -> list[Path]:
+def _chapter_paths(
+    book_dir: Path, chapters: list[int | float] | None = None
+) -> list[Path]:
     chapters_dir = book_dir / "source" / segment_state.CHAPTERS_DIR
-    paths = sorted(chapters_dir.glob("ch-*.json"), key=lambda p: int(p.stem.split("-")[-1]))
+
+    def number_of(path: Path) -> int | float:
+        return segment_state.chapter_number(path.stem.split("-")[-1])
+
+    paths = sorted(chapters_dir.glob("ch-*.json"), key=number_of)
     if chapters is not None:
-        wanted = set(chapters)
-        paths = [path for path in paths if int(path.stem.split("-")[-1]) in wanted]
+        wanted = {segment_state.chapter_number(value) for value in chapters}
+        paths = [path for path in paths if number_of(path) in wanted]
     return paths
 
 
@@ -82,61 +81,86 @@ def translate_book(
     budget: int = batch_translate.DEFAULT_BATCH_BUDGET,
     max_retries: int = batch_translate.MAX_PROTOCOL_RETRIES,
     polish: bool = True,
-    chapters: list[int] | None = None,
+    chapters: list[int | float] | None = None,
     progress_path: Path | None = None,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Translate pending segments and optionally polish them; return a summary."""
+    """Translate pending segments and optionally polish them; return a summary.
+
+    Progress is saved after every batch, so an interrupted run keeps all completed
+    batches. ``max_seconds`` stops between batches and returns ``stopped=True``;
+    rerunning the same command continues from the saved state.
+    """
     terms = load_glossary_terms(book_dir)
     translation_rules = section("translation", work_dir=book_dir)
     polish_rules = section("polish", work_dir=book_dir)
     translated = polished = 0
     failures: list[dict[str, Any]] = []
     context = ""
+    stopped = False
+    started = time.time()
     progress_path = progress_path or book_dir / "work_temp" / "progress.jsonl"
     for path in _chapter_paths(book_dir, chapters):
         chapter_started = time.time()
         chapter = segment_state.load_chapter(path)
         pending = _pending(chapter.get("segments") or [])
+        by_index = {int(segment.get("index", 0)): segment for segment in chapter["segments"]}
         chapter_translated = chapter_polished = chapter_failures = 0
         if pending:
-            results = batch_translate.translate_batch(
-                client,
-                pending,
-                budget=budget,
-                max_retries=max_retries,
-                glossary_terms=terms,
-                context=context,
-                rules=translation_rules,
-            )
-            stats = batch_translate.apply_targets(chapter, results)
-            translated += stats["applied"]
-            chapter_translated += stats["applied"]
-            chapter_results = [result for result in results if result.get("error")]
-            chapter_failures += len(chapter_results)
-            failures.extend(
-                {"chapter": chapter.get("chapter"), **result} for result in chapter_results
-            )
-            if polish:
-                to_polish = [
-                    segment for segment in pending if (segment.get("target") or "").strip()
-                ]
-                if to_polish:
-                    polished_results = polish_batch.polish_batch(
-                        client,
-                        to_polish,
-                        budget=budget,
-                        max_retries=max_retries,
-                        rules=polish_rules,
-                    )
-                    polished_stats = polish_batch.apply_polished(chapter, polished_results)
-                    polished += polished_stats["applied"]
-                    chapter_polished += polished_stats["applied"]
-                    polish_errors = [result for result in polished_results if result.get("error")]
-                    chapter_failures += len(polish_errors)
-                    failures.extend(
-                        {"chapter": chapter.get("chapter"), **result} for result in polish_errors
-                    )
-            segment_state.save_chapter(path, chapter)
+
+            def handle_batch(batch_results: list[dict[str, Any]]) -> None:
+                nonlocal translated, polished, chapter_translated, chapter_polished, chapter_failures
+                stats = batch_translate.apply_targets(chapter, batch_results)
+                translated += stats["applied"]
+                chapter_translated += stats["applied"]
+                batch_errors = [result for result in batch_results if result.get("error")]
+                chapter_failures += len(batch_errors)
+                failures.extend(
+                    {"chapter": chapter.get("chapter"), **result} for result in batch_errors
+                )
+                if polish:
+                    to_polish = []
+                    for result in batch_results:
+                        segment = by_index.get(int(result.get("index", -1)))
+                        if segment is not None and (segment.get("target") or "").strip():
+                            to_polish.append(segment)
+                    if to_polish:
+                        polished_results = polish_batch.polish_batch(
+                            client,
+                            to_polish,
+                            budget=budget,
+                            max_retries=max_retries,
+                            rules=polish_rules,
+                            glossary_terms=terms,
+                        )
+                        polished_stats = polish_batch.apply_polished(chapter, polished_results)
+                        polished += polished_stats["applied"]
+                        chapter_polished += polished_stats["applied"]
+                        polish_errors = [
+                            result for result in polished_results if result.get("error")
+                        ]
+                        chapter_failures += len(polish_errors)
+                        failures.extend(
+                            {"chapter": chapter.get("chapter"), **result}
+                            for result in polish_errors
+                        )
+                segment_state.save_chapter(path, chapter)
+                if max_seconds is not None and time.time() - started >= max_seconds:
+                    raise TimeBudgetExceeded()
+
+            try:
+                batch_translate.translate_batch(
+                    client,
+                    pending,
+                    budget=budget,
+                    max_retries=max_retries,
+                    glossary_terms=terms,
+                    context=context,
+                    rules=translation_rules,
+                    on_batch=handle_batch,
+                )
+            except TimeBudgetExceeded:
+                stopped = True
         _append_jsonl(
             progress_path,
             {
@@ -149,6 +173,8 @@ def translate_book(
                 "elapsed": round(time.time() - chapter_started, 2),
             },
         )
+        if stopped:
+            break
         context = _chapter_tail(chapter)
     return {
         "book_dir": str(book_dir),
@@ -156,6 +182,8 @@ def translate_book(
         "polished": polished,
         "failures": failures,
         "polish": polish,
+        "stopped": stopped,
+        "elapsed": round(time.time() - started, 1),
     }
 
 
@@ -169,6 +197,12 @@ def main() -> None:
     ap.add_argument("--effort", default="low")
     ap.add_argument("--max-tokens", type=int, default=32768)
     ap.add_argument("--budget", type=int, default=batch_translate.DEFAULT_BATCH_BUDGET)
+    ap.add_argument(
+        "--max-seconds",
+        type=float,
+        default=0,
+        help="stop gracefully between batches after N seconds (0 = no limit)",
+    )
     ap.add_argument("--no-polish", action="store_true")
     ap.add_argument(
         "--chapters",
@@ -178,7 +212,11 @@ def main() -> None:
     args = ap.parse_args()
     chapters = None
     if args.chapters:
-        chapters = [int(value) for value in args.chapters.split(",") if value.strip()]
+        chapters = [
+            segment_state.chapter_number(value.strip())
+            for value in args.chapters.split(",")
+            if value.strip()
+        ]
 
     if not args.book_dir.is_dir():
         raise SystemExit(f"book dir not found: {args.book_dir}")
@@ -196,6 +234,7 @@ def main() -> None:
         budget=args.budget,
         polish=not args.no_polish,
         chapters=chapters,
+        max_seconds=args.max_seconds or None,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if summary["failures"]:

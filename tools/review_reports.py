@@ -19,6 +19,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import segment_state
+
 REVIEW_DIR = "review"
 REPORT_VERSION = 1
 PASS = "PASS"
@@ -139,7 +141,9 @@ def _same_issue(issue: dict[str, Any], record: dict[str, Any]) -> bool:
     record_chapter = candidate.get("chapter")
     if issue_chapter is not None and record_chapter is not None:
         try:
-            if int(issue_chapter) != int(record_chapter):
+            if segment_state.chapter_number(issue_chapter) != segment_state.chapter_number(
+                record_chapter
+            ):
                 return False
         except (TypeError, ValueError):
             return False
@@ -338,12 +342,15 @@ def render_block_markdown(report: dict[str, Any]) -> str:
     if not issues:
         lines.append("未报告问题。")
     else:
-        lines.append("| 段 | 问题 | 建议 | 证据状态 |")
-        lines.append("|---|---|---|---|")
+        lines.append("| 段 | 类别 | 严重度 | 问题 | 建议 | 证据状态 |")
+        lines.append("|---|---|---|---|---|---|")
         for issue in issues:
             proposal = issue.get("proposal") or issue.get("message") or ""
             lines.append(
-                f"| {_cell(issue.get('segment_index'))} | {_cell(issue.get('message'))} "
+                f"| {_cell(issue.get('segment_index'))} "
+                f"| {_cell(issue.get('category') or '未标注')} "
+                f"| {_cell(issue.get('severity') or '未标注')} "
+                f"| {_cell(issue.get('message'))} "
                 f"| {_cell(proposal)} | {_cell(_evidence_status(issue, records))} |"
             )
 
@@ -420,11 +427,24 @@ def build_summary(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate block reports into a deterministic PASS/FAIL summary."""
     blocks: list[dict[str, Any]] = []
     counts = {PASS: 0, FAIL: 0}
+    style_issues: list[dict[str, Any]] = []
     for report in reports:
         verdict = str(report.get("verdict") or FAIL)
         if verdict in counts:
             counts[verdict] += 1
         report_counts = report.get("counts") or {}
+        for issue in report.get("issues") or []:
+            if str(issue.get("category") or "").strip().lower() != "style":
+                continue
+            style_issues.append(
+                {
+                    "block": _block_label(int(report.get("block") or 0)),
+                    "segment_index": issue.get("segment_index"),
+                    "severity": issue.get("severity"),
+                    "message": issue.get("message"),
+                    "proposal": issue.get("proposal"),
+                }
+            )
         blocks.append(
             {
                 "block": report.get("block"),
@@ -449,6 +469,7 @@ def build_summary(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "verdict": FAIL if counts[FAIL] else PASS,
         "counts": counts,
         "blocks": blocks,
+        "style_issues": style_issues,
     }
 
 
@@ -474,6 +495,16 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
             f"| {block.get('confirmed', 0)} | {block.get('unresolved', 0)} "
             f"| {block.get('unresolved_conflicts', 0)} |"
         )
+    style_issues = summary.get("style_issues") or []
+    if style_issues:
+        lines.extend(["", "## 风格建议", ""])
+        for issue in style_issues:
+            proposal = issue.get("proposal") or ""
+            lines.append(
+                f"- {issue.get('block')} 段 {issue.get('segment_index')} "
+                f"（{issue.get('severity') or '未标注'}）：{issue.get('message') or ''}"
+                + (f"；建议：{proposal}" if proposal else "")
+            )
     lines.extend(["", "> 审查仅提供建议，未修改正文。", ""])
     return "\n".join(lines)
 

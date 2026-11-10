@@ -10,7 +10,7 @@ segment order or paragraph count.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from batch_translate import (
     DEFAULT_BATCH_BUDGET,
@@ -18,6 +18,7 @@ from batch_translate import (
     ProtocolError,
     apply_targets,
     extract_targets,
+    relevant_glossary_terms,
 )
 from model_client import call_client
 from token_budget import estimate_tokens
@@ -40,12 +41,42 @@ def _rule_lines(rules: str | None) -> list[str]:
     return ["Polish rules:", rules.strip(), ""]
 
 
-def build_polish_prompt(segments: list[dict[str, Any]], rules: str | None = None) -> str:
+def _glossary_lines(
+    segments: list[dict[str, Any]], glossary_terms: list[Any] | None
+) -> list[str]:
+    terms = relevant_glossary_terms(segments, glossary_terms)
+    if not terms:
+        return []
+    lines = ["Glossary (keep these canonical targets):"]
+    for term in terms:
+        if not isinstance(term, dict):
+            continue
+        source = str(term.get("source") or term.get("id") or "")
+        target = str(term.get("target") or "")
+        if not source and not target:
+            continue
+        line = f"- {source}"
+        if target:
+            line += f" => {target}"
+        aliases = [str(alias) for alias in term.get("aliases") or [] if str(alias).strip()]
+        if aliases:
+            line += f" (aliases: {', '.join(aliases)})"
+        lines.append(line)
+    lines.append("")
+    return lines
+
+
+def build_polish_prompt(
+    segments: list[dict[str, Any]],
+    rules: str | None = None,
+    glossary_terms: list[Any] | None = None,
+) -> str:
     """Build a numbered polish request for exactly one target per segment."""
     lines = [
         "Polish each numbered Chinese translation segment.",
         "Keep the meaning, characters, plot and tone unchanged.",
         *_rule_lines(rules),
+        *_glossary_lines(segments, glossary_terms),
         *_protocol_preamble(len(segments)),
     ]
     for segment in segments:
@@ -53,12 +84,17 @@ def build_polish_prompt(segments: list[dict[str, Any]], rules: str | None = None
     return "\n".join(lines)
 
 
-def build_single_polish_prompt(segment: dict[str, Any], rules: str | None = None) -> str:
+def build_single_polish_prompt(
+    segment: dict[str, Any],
+    rules: str | None = None,
+    glossary_terms: list[Any] | None = None,
+) -> str:
     """Build a one-segment polish request for the fallback path."""
     lines = [
         "Polish the Chinese translation segment.",
         "Keep the meaning, characters, plot and tone unchanged.",
         *_rule_lines(rules),
+        *_glossary_lines([segment], glossary_terms),
         *_protocol_preamble(1),
     ]
     lines.append(f"[{segment.get('index')}] {segment.get('target') or ''}")
@@ -124,13 +160,22 @@ def _error_text(exc: Exception) -> str:
 
 
 def _fallback(
-    client: Any, segments: list[dict[str, Any]], rules: str | None = None
+    client: Any,
+    segments: list[dict[str, Any]],
+    rules: str | None = None,
+    glossary_terms: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     results = []
     for segment in segments:
         try:
             targets = validate_polish_output(
-                call_client(client, build_single_polish_prompt(segment, rules=rules)), 1
+                call_client(
+                    client,
+                    build_single_polish_prompt(
+                        segment, rules=rules, glossary_terms=glossary_terms
+                    ),
+                ),
+                1,
             )
         except Exception as exc:
             results.append(
@@ -163,6 +208,8 @@ def polish_batch(
     measure=None,
     max_retries: int = MAX_PROTOCOL_RETRIES,
     rules: str | None = None,
+    glossary_terms: list[Any] | None = None,
+    on_batch: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Polish translated segments with an equal-length completeness contract.
 
@@ -170,6 +217,7 @@ def polish_batch(
     are retried up to ``max_retries`` additional times. If the batch cannot be
     planned or all attempts fail, every segment gets one fallback call. The
     returned list follows input order and contains one result per segment.
+    ``on_batch`` is called with each batch's results as soon as they are ready.
     """
     segments = list(segments)
     if not segments:
@@ -182,26 +230,39 @@ def polish_batch(
     try:
         batches = plan_polish_batches(segments, budget, measure)
     except ValueError:
-        return _fallback(client, segments, rules)
+        results = _fallback(client, segments, rules, glossary_terms)
+        if on_batch is not None:
+            on_batch(results)
+        return results
 
     results: list[dict[str, Any]] = []
     for batch in batches:
+        batch_results: list[dict[str, Any]] = []
         attempts = 0
         for _ in range(max_retries + 1):
             attempts += 1
             try:
                 targets = validate_polish_output(
-                    call_client(client, build_polish_prompt(batch, rules=rules)), len(batch)
+                    call_client(
+                        client,
+                        build_polish_prompt(
+                            batch, rules=rules, glossary_terms=glossary_terms
+                        ),
+                    ),
+                    len(batch),
                 )
             except ProtocolError:
                 continue
             for segment, target in zip(batch, targets):
-                results.append(
+                batch_results.append(
                     _result(segment, target=target, error=None, attempts=attempts, stage="batch")
                 )
             break
         else:
-            results.extend(_fallback(client, batch, rules))
+            batch_results.extend(_fallback(client, batch, rules, glossary_terms))
+        results.extend(batch_results)
+        if on_batch is not None:
+            on_batch(batch_results)
 
     return results
 

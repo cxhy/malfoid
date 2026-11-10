@@ -94,3 +94,10 @@ def female_draco(name: str | None = None, work_dir: Path | None = None) -> dict[
     manifest = load_profile(name, work_dir)
     value = manifest.get("female_draco")
     return value if isinstance(value, dict) else {}
+
+
+def foreign_text_allowlist(name: str | None = None, work_dir: Path | None = None) -> list[str]:
+    """Return canonical foreign-language phrases that checks must not flag."""
+    manifest = load_profile(name, work_dir)
+    value = manifest.get("foreign_text_allowlist")
+    return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []

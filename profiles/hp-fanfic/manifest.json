@@ -13,6 +13,7 @@
     "book_review": "book_review.md"
   },
   "forbidden_names": ["达西"],
+  "foreign_text_allowlist": ["Erised stra ehru oyt ube cafru oyt on wohsi"],
   "female_draco": {
     "full": "德拉科妮娅·马尔福",
     "short": "德拉科妮娅",

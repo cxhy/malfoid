@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import book_delivery
+import pytest
 import segment_state
+import verify_book
 
 
 def _segment(index: int, source: str, target: str | None, *, kind: str = "text") -> dict:
@@ -31,7 +33,7 @@ def _write_book(tmp_path: Path) -> Path:
             "heading_level": 1,
             "segments": [
                 _segment(0, "Chapter One", "第一章", kind="heading"),
-                _segment(1, "Draco waited.", "德拉科等待着。"),
+                _segment(1, "Draconia waited.", "德拉科妮娅等待着。"),
             ],
         },
         {
@@ -64,15 +66,15 @@ def test_write_delivery_writes_translated_markdown_and_template_html(tmp_path: P
 
     markdown = result.markdown.read_text(encoding="utf-8")
     assert markdown.startswith("# 第一章")
-    assert "德拉科等待着。" in markdown
+    assert "德拉科妮娅等待着。" in markdown
     assert "哈利抬起头。" in markdown
-    assert "Draco waited." not in markdown
+    assert "Draconia waited." not in markdown
 
     html = result.html.read_text(encoding="utf-8")
     assert "FangSong" in html
     assert "toc-toggle" in html
     assert "目录" in html
-    assert "德拉科等待着。" in html
+    assert "德拉科妮娅等待着。" in html
     assert "哈利抬起头。" in html
     assert 'content="Test Author"' in html
 
@@ -147,3 +149,23 @@ def test_split_markdown_rejects_a_single_oversized_chapter() -> None:
         assert "chapter" in str(exc)
     else:
         raise AssertionError("oversized chapter should be rejected")
+
+
+def test_write_delivery_rejects_forbidden_names(tmp_path: Path) -> None:
+    book = _write_book(tmp_path)
+    path = segment_state.chapter_path(book, 1)
+    chapter = segment_state.load_chapter(path)
+    chapter["segments"][1]["target"] = "德拉科等待着。"
+    segment_state.save_chapter(path, chapter)
+    with pytest.raises(verify_book.DeliveryVerificationError):
+        book_delivery.write_delivery(book)
+
+
+def test_write_delivery_can_skip_verification(tmp_path: Path) -> None:
+    book = _write_book(tmp_path)
+    path = segment_state.chapter_path(book, 1)
+    chapter = segment_state.load_chapter(path)
+    chapter["segments"][1]["target"] = "德拉科等待着。"
+    segment_state.save_chapter(path, chapter)
+    result = book_delivery.write_delivery(book, verify=False)
+    assert result.markdown.is_file()

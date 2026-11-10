@@ -15,6 +15,8 @@ from pathlib import Path
 SERIES_FILE = "series.json"
 SERIES_GLOSSARY = "glossary.json"
 SERIES_BIBLE = "story_bible.md"
+GLOBAL_GLOSSARY_DIR = "glossary"
+GLOBAL_GLOSSARY_FILE = "hp.json"
 BOOKS_DIR = "books"
 BOOK_PREFIX = "book-"
 
@@ -66,6 +68,28 @@ def _book_glossary_path(book: Path) -> Path:
 def _load_master(root: Path) -> dict:
     path = _master_path(root)
     return _read_json(path) if path.is_file() else empty_glossary()
+
+
+def global_glossary_path(root: Path) -> Path:
+    """Return the workspace global glossary path for a series root.
+
+    The global table is intentionally outside ``works/`` so it can be reviewed
+    and versioned carefully. It holds canonical HP terms plus the project-wide
+    gender-swapped Malfoy rule, never series-specific or AU terms.
+    """
+    return root.parent.parent / GLOBAL_GLOSSARY_DIR / GLOBAL_GLOSSARY_FILE
+
+
+def load_global_terms(root: Path) -> list[dict]:
+    """Load canonical global terms; missing or invalid file means no global layer."""
+    path = global_glossary_path(root)
+    if not path.is_file():
+        return []
+    try:
+        data = _read_json(path)
+    except (OSError, ValueError):
+        return []
+    return [dict(term) for term in data.get("terms") or [] if isinstance(term, dict)]
 
 
 def is_series_root(path: Path) -> bool:
@@ -191,8 +215,7 @@ def create_book(root: Path, number: int, title: str = "") -> Path:
         )
     _upsert_book_entry(series, number, resolved_title)
     save_series(root, series)
-    if not _book_glossary_path(path).is_file():
-        copy_glossary_to_book(root, number)
+    sync_glossary(path)
     return path
 
 
@@ -211,20 +234,103 @@ def merge_master_into_book(book_terms: list[dict], master_terms: list[dict]) -> 
 def copy_glossary_to_book(root: Path, number: int) -> Path:
     book = resolve_book(root, number)
     master = _load_master(root)
+    master_terms, _ = merge_global_series(
+        load_global_terms(root), list(master.get("terms") or [])
+    )
     dest = _book_glossary_path(book)
     if dest.is_file():
         book_glossary = _read_json(dest)
         book_glossary["terms"] = merge_master_into_book(
-            list(book_glossary.get("terms") or []), list(master.get("terms") or [])
+            list(book_glossary.get("terms") or []), master_terms
         )
         _write_json(dest, book_glossary)
     else:
-        _write_json(dest, master)
+        data = dict(master)
+        data["terms"] = master_terms
+        _write_json(dest, data)
     return dest
 
 
 def _term_key(term: dict) -> str:
     return str(term.get("id") or term.get("source") or "")
+
+
+def _merge_additive_fields(target: dict, term: dict) -> bool:
+    """Merge aliases, notes, metadata and forbidden variants into a term."""
+    changed = False
+    aliases = list(target.get("aliases") or [])
+    for alias in term.get("aliases") or []:
+        if alias not in aliases:
+            aliases.append(alias)
+            changed = True
+    if aliases:
+        target["aliases"] = aliases
+    for field in ("notes", "category", "gender", "confidence"):
+        if term.get(field) and not target.get(field):
+            target[field] = term[field]
+            changed = True
+    for field in ("forbidden_targets", "evidence_refs"):
+        existing = list(target.get(field) or [])
+        for value in term.get(field) or []:
+            if value not in existing:
+                existing.append(value)
+                changed = True
+        if existing:
+            target[field] = existing
+    return changed
+
+
+def _has_extra_fields(term: dict, base: dict) -> bool:
+    """True when a book term adds fields beyond the canonical global term."""
+    for field in ("aliases", "forbidden_targets", "evidence_refs"):
+        base_values = {str(value) for value in base.get(field) or []}
+        for value in term.get(field) or []:
+            if str(value) not in base_values:
+                return True
+    base_notes = str(base.get("notes") or "")
+    term_notes = str(term.get("notes") or "")
+    return bool(term_notes and term_notes != base_notes)
+
+
+def merge_global_series(
+    global_terms: list[dict], series_terms: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Merge a series master over the global baseline.
+
+    The global table is authoritative for canonical terms. A series term with a
+    different target must set ``override_global: true``; otherwise the global
+    target wins and the disagreement is returned as a conflict. Series-only terms
+    are added as-is, and additive fields (aliases, notes, forbidden variants) are
+    always merged.
+    """
+    merged = [dict(term) for term in global_terms]
+    index = {_term_key(term): position for position, term in enumerate(merged)}
+    conflicts: list[dict] = []
+    for term in series_terms:
+        key = _term_key(term)
+        if not key:
+            continue
+        if key not in index:
+            merged.append(dict(term))
+            index[key] = len(merged) - 1
+            continue
+        target = merged[index[key]]
+        override = bool(term.get("override_global"))
+        series_target = term.get("target") or ""
+        global_target = target.get("target") or ""
+        if series_target and global_target and series_target != global_target:
+            if override:
+                target["target"] = series_target
+            else:
+                conflicts.append(
+                    {"id": key, "global": global_target, "series": series_target}
+                )
+        if override:
+            for field in ("source", "target"):
+                if term.get(field):
+                    target[field] = term[field]
+        _merge_additive_fields(target, term)
+    return merged, conflicts
 
 
 def merge_terms(master_terms: list[dict], book_terms: list[dict]) -> tuple[list[dict], dict]:
@@ -257,37 +363,209 @@ def merge_terms(master_terms: list[dict], book_terms: list[dict]) -> tuple[list[
                 changed = True
             elif book_target != master_target:
                 conflicts.append({"id": key, "master": master_target, "book": book_target})
-        aliases = list(target.get("aliases") or [])
-        for alias in term.get("aliases") or []:
-            if alias not in aliases:
-                aliases.append(alias)
-                changed = True
-        target["aliases"] = aliases
-        if term.get("notes") and not target.get("notes"):
-            target["notes"] = term["notes"]
-            changed = True
-        for field in ("category", "gender", "confidence"):
-            if term.get(field) and not target.get(field):
-                target[field] = term[field]
-                changed = True
-        if term.get("evidence_refs") and not target.get("evidence_refs"):
-            target["evidence_refs"] = term["evidence_refs"]
+        if _merge_additive_fields(target, term):
             changed = True
         if changed:
             updated += 1
     return merged, {"added": added, "updated": updated, "conflicts": conflicts}
 
 
+def merged_glossary_terms(book: Path) -> list[dict]:
+    """Return global + series + book terms for active use.
+
+    Resolution order: global canonical baseline, then the series master, then
+    the book copy. The series master can override a global target only with
+    ``override_global: true``; otherwise the global target wins and the series
+    disagreement is a reported conflict. Book terms supplement the series: they
+    cannot replace an existing target, but their additive fields are merged.
+    """
+    book = Path(book)
+    root = book.parent.parent
+    global_terms = load_global_terms(root)
+    series_terms = list(_load_master(root).get("terms") or []) if is_series_root(root) else []
+    merged, _ = merge_global_series(global_terms, series_terms)
+    index = {_term_key(term): i for i, term in enumerate(merged)}
+    book_path = _book_glossary_path(book)
+    book_terms = []
+    if book_path.is_file():
+        book_terms = list(_read_json(book_path).get("terms") or [])
+    for term in book_terms:
+        key = _term_key(term)
+        if not key:
+            continue
+        if key not in index:
+            merged.append(dict(term))
+            index[key] = len(merged) - 1
+            continue
+        target = merged[index[key]]
+        for field in ("source", "target"):
+            if not target.get(field) and term.get(field):
+                target[field] = term[field]
+        _merge_additive_fields(target, term)
+    return merged
+
+
+def sync_glossary(book: Path) -> Path:
+    """Refresh a book glossary from the series master and return its path."""
+    book = Path(book)
+    path = _book_glossary_path(book)
+    data = _read_json(path) if path.is_file() else empty_glossary()
+    data["terms"] = merged_glossary_terms(book)
+    _write_json(path, data)
+    return path
+
+
+def load_glossary_terms(book: Path) -> list[dict]:
+    """Load and synchronize the merged glossary for translation/review use."""
+    sync_glossary(book)
+    return merged_glossary_terms(book)
+
+
+def _parse_story_bible_terms(text: str) -> list[dict]:
+    """Extract unambiguous English→Chinese rows from story-bible tables."""
+    terms: list[dict] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        source = cells[0].strip("*` ")
+        target = cells[1].strip("*` ")
+        if not source or not target:
+            continue
+        if not re.search(r"[A-Za-z]", source):
+            continue
+        if "/" in source or "/" in target:
+            continue
+        if any(marker in target for marker in ("或", "保留", "视上下文", "按语境", "待定")):
+            continue
+        terms.append(
+            {
+                "id": source,
+                "source": source,
+                "target": target,
+                "aliases": [],
+                "category": "term",
+                "gender": "unknown",
+                "confidence": "medium",
+                "frequency": 0,
+                "evidence_refs": [],
+                "notes": "story bible term",
+            }
+        )
+    return terms
+
+
+def load_story_bible_terms(book: Path) -> list[dict]:
+    """Load supplementary terms from the book and series story bibles."""
+    book = Path(book)
+    paths = [book / "work_temp" / "prescan" / "story_bible.md"]
+    root = book.parent.parent
+    if is_series_root(root):
+        paths.append(root / SERIES_BIBLE)
+    seen: set[str] = set()
+    terms: list[dict] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        for term in _parse_story_bible_terms(path.read_text(encoding="utf-8")):
+            key = term["source"].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+    return terms
+
+
+def load_context_terms(book: Path) -> list[dict]:
+    """Merge glossary and story-bible terms; the glossary always wins."""
+    terms = load_glossary_terms(book)
+    seen = set()
+    for term in terms:
+        source = str(term.get("source") or term.get("id") or "")
+        if source:
+            seen.add(source.casefold())
+        for alias in term.get("aliases") or []:
+            if isinstance(alias, str) and alias:
+                seen.add(alias.casefold())
+    for term in load_story_bible_terms(book):
+        key = term["source"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+    return terms
+
+
 def merge_glossary_back(root: Path, number: int) -> dict:
+    """Merge book-local terms into the series master, not the global table.
+
+    Global terms that the book copy carries are ignored unless the book adds
+    additive fields; a book-level target that disagrees with a global canonical
+    term is a conflict and is not written. Series-only book terms are added, and
+    existing series targets stay authoritative. The global table is never edited
+    by this operation.
+    """
     master = _load_master(root)
+    global_terms = load_global_terms(root)
+    global_index = {_term_key(term): i for i, term in enumerate(global_terms)}
     book = resolve_book(root, number)
     book_path = _book_glossary_path(book)
     if not book_path.is_file():
         raise FileNotFoundError(f"book glossary not found: {book_path}")
     book_glossary = _read_json(book_path)
-    terms, counts = merge_terms(
-        list(master.get("terms") or []), list(book_glossary.get("terms") or [])
-    )
-    master["terms"] = terms
+    merged = [dict(term) for term in master.get("terms") or []]
+    series_index = {_term_key(term): i for i, term in enumerate(merged)}
+    added = updated = 0
+    conflicts: list[dict] = []
+    for term in book_glossary.get("terms") or []:
+        key = _term_key(term)
+        if not key:
+            continue
+        if key in series_index:
+            target = merged[series_index[key]]
+            changed = False
+            book_target = term.get("target") or ""
+            series_target = target.get("target") or ""
+            if book_target:
+                if not series_target:
+                    target["target"] = book_target
+                    changed = True
+                elif book_target != series_target:
+                    conflicts.append(
+                        {"id": key, "master": series_target, "book": book_target}
+                    )
+            if not target.get("source") and term.get("source"):
+                target["source"] = term["source"]
+                changed = True
+            if _merge_additive_fields(target, term):
+                changed = True
+            if changed:
+                updated += 1
+            continue
+        if key in global_index:
+            global_term = global_terms[global_index[key]]
+            global_target = global_term.get("target") or ""
+            book_target = term.get("target") or ""
+            if book_target and global_target and book_target != global_target:
+                conflicts.append(
+                    {"id": key, "global": global_target, "book": book_target}
+                )
+                continue
+            if _has_extra_fields(term, global_term):
+                new_term = dict(term)
+                new_term["source"] = global_term.get("source") or term.get("source") or key
+                new_term["target"] = global_target or term.get("target") or ""
+                new_term.setdefault("override_global", False)
+                merged.append(new_term)
+                series_index[key] = len(merged) - 1
+                added += 1
+            continue
+        merged.append(dict(term))
+        series_index[key] = len(merged) - 1
+        added += 1
+    master["terms"] = merged
     _write_json(_master_path(root), master)
-    return counts
+    return {"added": added, "updated": updated, "conflicts": conflicts}

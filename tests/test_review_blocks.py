@@ -584,3 +584,26 @@ def test_validate_review_output_keeps_real_issue_that_mentions_no_issue() -> Non
     )
     result = review_blocks.validate_review_output(payload, 1)
     assert result["issues"] == [issue]
+
+
+def test_run_review_injects_relevant_glossary_terms() -> None:
+    segments = [_segment(0, "Kwikspell letter.", "速成咒术课程的信。")]
+    client = ReviewClient()
+    review_blocks.run_review(
+        client,
+        segments,
+        budget=100,
+        workers=1,
+        glossary_terms=[{"source": "Kwikspell", "target": "速成咒术课程"}],
+    )
+    assert any("GLOSSARY" in prompt and "速成咒术课程" in prompt for prompt in client.calls)
+
+
+def test_build_review_prompt_requires_sentence_level_fidelity() -> None:
+    prompt = review_blocks.build_review_prompt(
+        [_segment(0, "Don't you dare, levicor....", "“你敢！利维科……”")]
+    )
+    for phrase in ("omission", "addition", "mistranslation", "semantic reversal"):
+        assert phrase in prompt
+    assert "sentence-level fidelity" in prompt
+    assert "only cross-chapter" not in prompt

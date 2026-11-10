@@ -203,3 +203,209 @@ def test_legacy_flat_work_is_not_treated_as_a_series(tmp_path: Path) -> None:
         book_state.resolve_book(flat, 1)
     assert not (flat / "series.json").exists()
     assert not (flat / "books").exists()
+
+
+def test_load_glossary_terms_merges_master_and_book_with_master_target(tmp_path: Path) -> None:
+    root = _series(tmp_path)
+    _write(
+        root / "glossary.json",
+        _glossary(
+            _term(
+                "Kwikspell",
+                "速成咒术课程",
+                forbidden_targets=["快速咒语课程"],
+            )
+        ),
+    )
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(
+            _term("Kwikspell", "速成咒课程"),
+            _term("Pawter", "波爪"),
+        ),
+    )
+    terms = book_state.load_glossary_terms(book)
+    by_id = {term["id"]: term for term in terms}
+    assert by_id["Kwikspell"]["target"] == "速成咒术课程"
+    assert by_id["Kwikspell"]["forbidden_targets"] == ["快速咒语课程"]
+    assert by_id["Pawter"]["target"] == "波爪"
+    synced = json.loads((book / "work_temp" / "glossary.json").read_text(encoding="utf-8"))
+    assert {term["id"] for term in synced["terms"]} == {"Kwikspell", "Pawter"}
+
+
+def test_create_book_syncs_existing_book_glossary_from_master(tmp_path: Path) -> None:
+    root = _series(tmp_path)
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(_term("Kwikspell", "速成咒课程")),
+    )
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Kwikspell", "速成咒术课程")),
+    )
+    book_state.create_book(root, 1, title="Book 1")
+    synced = json.loads((book / "work_temp" / "glossary.json").read_text(encoding="utf-8"))
+    assert synced["terms"][0]["target"] == "速成咒术课程"
+
+
+def test_load_context_terms_adds_story_bible_terms_without_overriding_glossary(
+    tmp_path: Path,
+) -> None:
+    root = _series(tmp_path)
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Draconia Malfoy", "德拉科妮娅·马尔福", aliases=["Draconia"])),
+    )
+    book = book_state.resolve_book(root, 1)
+    bible = book / "work_temp" / "prescan" / "story_bible.md"
+    bible.parent.mkdir(parents=True, exist_ok=True)
+    bible.write_text(
+        "\n".join(
+            [
+                "| 英文 | 中文 | 代词 | 备注 |",
+                "|---|---|---|---|",
+                "| Draconia Malfoy | 德拉科尼亚·马尔福 | 她 | 冲突时以术语表为准 |",
+                "| Hedwig | 海德薇 | 它 | 哈利的猫头鹰 |",
+                "| Remus Lupin | 莱姆斯·卢平 / 卢平教授 | 他 | 含斜杠，跳过 |",
+                "| Fred / George Weasley | 弗雷德 / 乔治 | 他 | 多来源，跳过 |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    terms = book_state.load_context_terms(book)
+    by_source = {term["source"]: term["target"] for term in terms}
+    assert by_source["Draconia Malfoy"] == "德拉科妮娅·马尔福"
+    assert by_source["Hedwig"] == "海德薇"
+    assert "Remus Lupin" not in by_source
+    assert "Fred / George Weasley" not in by_source
+
+
+def _series_with_global(tmp_path: Path, global_terms: list[dict]) -> Path:
+    root = tmp_path / "workspace" / "series"
+    book_state.create_series(
+        root,
+        series_id="hp-global-test",
+        title="Global Test",
+        author="tester",
+        books=[{"number": 1, "title": "Book 1"}],
+    )
+    _write(
+        tmp_path / "glossary" / "hp.json",
+        {
+            "version": 2,
+            "scope": "global",
+            "fandom": "Harry Potter",
+            "terms": global_terms,
+        },
+    )
+    return root
+
+
+def test_global_terms_fill_series_and_book(tmp_path: Path) -> None:
+    root = _series_with_global(
+        tmp_path, [_term("Harry Potter", "哈利·波特", aliases=["Harry"])]
+    )
+    book = book_state.resolve_book(root, 1)
+    terms = book_state.load_glossary_terms(book)
+    by_id = {term["id"]: term for term in terms}
+    assert by_id["Harry Potter"]["target"] == "哈利·波特"
+    synced = json.loads((book / "work_temp" / "glossary.json").read_text(encoding="utf-8"))
+    assert {term["id"] for term in synced["terms"]} == {"Harry Potter"}
+
+
+def test_series_cannot_override_global_without_flag(tmp_path: Path) -> None:
+    root = _series_with_global(
+        tmp_path, [_term("Hospital Wing", "校医院")]
+    )
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Hospital Wing", "医疗翼")),
+    )
+    book = book_state.resolve_book(root, 1)
+    terms = book_state.load_glossary_terms(book)
+    by_id = {term["id"]: term for term in terms}
+    assert by_id["Hospital Wing"]["target"] == "校医院"
+
+
+def test_series_can_override_global_with_flag(tmp_path: Path) -> None:
+    root = _series_with_global(
+        tmp_path, [_term("Hospital Wing", "校医院")]
+    )
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Hospital Wing", "医疗翼", override_global=True)),
+    )
+    book = book_state.resolve_book(root, 1)
+    terms = book_state.load_glossary_terms(book)
+    by_id = {term["id"]: term for term in terms}
+    assert by_id["Hospital Wing"]["target"] == "医疗翼"
+
+
+def test_merge_glossary_back_ignores_global_terms(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [_term("Harry Potter", "哈利·波特")])
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(_term("Harry Potter", "哈利·波特")),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    assert merged["terms"] == []
+    assert result == {"added": 0, "updated": 0, "conflicts": []}
+
+
+def test_merge_glossary_back_adds_book_only_term_over_global(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [_term("Harry Potter", "哈利·波特")])
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(
+            _term("Harry Potter", "哈利·波特"),
+            _term("Original Character", "原创角色"),
+        ),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    assert [term["id"] for term in merged["terms"]] == ["Original Character"]
+    assert result == {"added": 1, "updated": 0, "conflicts": []}
+
+
+def test_merge_glossary_back_rejects_book_override_of_global(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [_term("Harry Potter", "哈利·波特")])
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(_term("Harry Potter", "哈利波特")),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    assert merged["terms"] == []
+    assert result["conflicts"] == [
+        {"id": "Harry Potter", "global": "哈利·波特", "book": "哈利波特"}
+    ]
+
+
+def test_merge_glossary_back_merges_forbidden_targets(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [])
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Kwikspell", "速成咒术课程")),
+    )
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(
+            _term(
+                "Kwikspell",
+                "速成咒术课程",
+                forbidden_targets=["快速咒语课程"],
+            )
+        ),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    by_id = {term["id"]: term for term in merged["terms"]}
+    assert by_id["Kwikspell"]["forbidden_targets"] == ["快速咒语课程"]
+    assert result == {"added": 0, "updated": 1, "conflicts": []}

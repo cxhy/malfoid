@@ -711,3 +711,110 @@ def test_review_with_arbitration_keeps_unverified_contradictions() -> None:
     assert len(result["conflicts"]) == 1
     assert result["conflicts"][0]["needs_human"] is True
     assert len(result["unresolved_conflicts"]) == 1
+
+
+def test_verify_candidates_confirms_glossary_variant_without_model_call() -> None:
+    chapters = [
+        _chapter(
+            1,
+            [
+                _segment(
+                    0,
+                    "Don't you dare, levicor....",
+                    "“你敢！利维科……”",
+                    chapter=1,
+                )
+            ],
+        )
+    ]
+    candidate = _candidate(
+        segment_index=0,
+        message="咒语译名错误：利维科应为倒挂金钟。",
+        proposal="改为“倒挂金…”。",
+    )
+    candidate["category"] = "terminology"
+    glossary = [
+        {
+            "id": "Levicorpus",
+            "source": "Levicorpus",
+            "target": "倒挂金钟",
+            "aliases": ["levicor"],
+            "forbidden_targets": ["利维科", "利维科斯"],
+        }
+    ]
+    client = SequenceClient([])
+    result = review_evidence.verify_candidates(
+        client, [candidate], chapters, glossary_terms=glossary
+    )
+    assert result[0]["status"] == "confirmed"
+    assert result[0]["deterministic"] is True
+    assert client.calls == []
+
+
+def test_verify_candidate_keeps_model_path_without_glossary_hit() -> None:
+    chapters = [_chapter(1, [_segment(0, "Malfoy waited.", "马尔福等待着。", chapter=1)])]
+    candidate = _candidate(
+        segment_index=0,
+        message="术语建议：确认马尔福家称呼。",
+        proposal="核对全书。",
+    )
+    candidate["category"] = "terminology"
+    client = SequenceClient([_verification_payload("rejected", "没有术语违规。")])
+    result = review_evidence.verify_candidates(
+        client,
+        [candidate],
+        chapters,
+        glossary_terms=[
+            {
+                "id": "Malfoy",
+                "source": "Malfoy",
+                "target": "马尔福",
+                "forbidden_targets": ["马家"],
+            }
+        ],
+    )
+    assert result[0]["status"] == "rejected"
+    assert result[0].get("deterministic") is not True
+    assert client.calls
+
+
+def test_evidence_prompt_injects_glossary_canonical_targets() -> None:
+    chapters = [_chapter(1, [_segment(0, "Kwikspell letter.", "速成咒术课程的信。", chapter=1)])]
+    candidate = _candidate(
+        segment_index=0,
+        message="术语建议：核对课程名。",
+        proposal="核对。",
+    )
+    candidate["category"] = "terminology"
+    client = SequenceClient([_verification_payload("confirmed")])
+    result = review_evidence.verify_candidates(
+        client,
+        [candidate],
+        chapters,
+        glossary_terms=[
+            {"id": "Kwikspell", "source": "Kwikspell", "target": "速成咒术课程"}
+        ],
+    )
+    assert result[0]["status"] == "confirmed"
+    assert any(
+        "GLOSSARY (canonical targets)" in prompt and "速成咒术课程" in prompt
+        for prompt in client.calls
+    )
+
+
+def test_collect_candidates_preserves_category_and_severity() -> None:
+    review = {
+        "issues": [
+            {
+                "segment_index": 0,
+                "message": "术语错误。",
+                "proposal": "改回术语表译名。",
+                "category": "terminology",
+                "severity": "low",
+            }
+        ]
+    }
+    blocks = [[_segment(0, "levicor...", "利维科……", chapter=1)]]
+    candidates = review_evidence.collect_candidates([review], blocks)
+    assert candidates[0]["category"] == "terminology"
+    assert candidates[0]["severity"] == "low"

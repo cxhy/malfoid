@@ -19,6 +19,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import book_state
+import preflight_model
 import review_blocks
 import review_evidence
 import review_reports
@@ -37,9 +39,9 @@ def load_chapters(book_dir: Path) -> list[dict[str, Any]]:
     """Load chapter state in numeric order."""
     chapters_dir = Path(book_dir) / "source" / segment_state.CHAPTERS_DIR
 
-    def sort_key(path: Path) -> int:
-        match = re.search(r"(\d+)$", path.stem)
-        return int(match.group(1)) if match else 0
+    def sort_key(path: Path) -> float:
+        match = re.search(r"(\d+(?:\.\d+)?)$", path.stem)
+        return float(match.group(1)) if match else 0.0
 
     paths = sorted(chapters_dir.glob("ch-*.json"), key=sort_key)
     return [segment_state.load_chapter(path) for path in paths]
@@ -47,7 +49,7 @@ def load_chapters(book_dir: Path) -> list[dict[str, Any]]:
 
 def flatten_segments(
     chapters: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[int, tuple[int, int]]]:
+) -> tuple[list[dict[str, Any]], dict[int, tuple[int | float, int]]]:
     """Flatten chapters into one contiguous review sequence.
 
     Each segment gets a global ``index`` for the review prompt and keeps its
@@ -55,9 +57,9 @@ def flatten_segments(
     index back to ``(chapter, local_index)``.
     """
     segments: list[dict[str, Any]] = []
-    global_map: dict[int, tuple[int, int]] = {}
+    global_map: dict[int, tuple[int | float, int]] = {}
     for position, chapter in enumerate(chapters):
-        number = int(chapter.get("chapter") or position + 1)
+        number = segment_state.chapter_number(chapter.get("chapter") or position + 1)
         for segment in chapter.get("segments") or []:
             local_index = int(segment.get("index", 0))
             item = dict(segment)
@@ -70,7 +72,7 @@ def flatten_segments(
 
 
 def map_reviews(
-    reviews: list[dict[str, Any]], global_map: dict[int, tuple[int, int]]
+    reviews: list[dict[str, Any]], global_map: dict[int, tuple[int | float, int]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Map global issue indices to chapter/local positions."""
     mapped: list[dict[str, Any]] = []
@@ -105,7 +107,7 @@ def map_reviews(
 
 
 def map_candidates(
-    candidates: list[dict[str, Any]], global_map: dict[int, tuple[int, int]]
+    candidates: list[dict[str, Any]], global_map: dict[int, tuple[int | float, int]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Map global candidate indices to chapter/local positions and refresh ids."""
     mapped: list[dict[str, Any]] = []
@@ -144,6 +146,7 @@ def verify_and_arbitrate(
     max_refs: int = review_evidence.DEFAULT_MAX_EVIDENCE_REFS,
     max_chars: int = review_evidence.DEFAULT_MAX_EVIDENCE_CHARS,
     verified_only: bool = False,
+    glossary_terms: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify candidates, group conflicts and arbitrate them."""
     verified = review_evidence.verify_candidates(
@@ -153,6 +156,7 @@ def verify_and_arbitrate(
         max_rounds=max_rounds,
         max_refs=max_refs,
         max_chars=max_chars,
+        glossary_terms=glossary_terms,
     )
     conflicts = review_evidence.group_conflicts(verified, verified_only=verified_only)
     arbitrations = review_evidence.arbitrate(client, conflicts)
@@ -202,6 +206,7 @@ def review_book(
         )
         if isinstance(part, str) and part.strip()
     )
+    glossary_terms = book_state.load_context_terms(book)
     reviews = review_blocks.run_review(
         client,
         segments,
@@ -215,13 +220,16 @@ def review_book(
         cache_dir=cache_dir,
         trace_dir=trace_dir,
         rules=rules,
+        glossary_terms=glossary_terms,
     )
     if len(reviews) != len(blocks):
         raise RuntimeError("review block planning changed between plan and run")
     candidates = review_evidence.collect_candidates(reviews, blocks)
     candidates, untraceable_candidates = map_candidates(candidates, global_map)
     local_reviews, untraceable_issues = map_reviews(reviews, global_map)
-    evidence = verify_and_arbitrate(client, candidates, chapters)
+    evidence = verify_and_arbitrate(
+        client, candidates, chapters, glossary_terms=glossary_terms
+    )
     summary = review_reports.write_review_reports(
         book, local_reviews, evidence_result=evidence, report_dir=report_dir
     )
@@ -313,7 +321,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--effort", default="none")
     parser.add_argument("--max-tokens", type=int, default=24000)
     parser.add_argument("--budget", type=int, default=review_blocks.DEFAULT_REVIEW_BUDGET)
-    parser.add_argument("--workers", type=int, default=review_blocks.DEFAULT_WORKERS)
+    parser.add_argument("--workers", type=int, default=None, help="review workers; default: preflight recommendation")
+    parser.add_argument("--no-preflight", action="store_true", help="skip the endpoint probe and use one worker")
     parser.add_argument("--max-bisect-depth", type=int, default=review_blocks.DEFAULT_BISECT_DEPTH)
     parser.add_argument(
         "--max-segment-retries", type=int, default=review_blocks.DEFAULT_SEGMENT_RETRIES
@@ -341,6 +350,14 @@ def main(argv: list[str] | None = None) -> None:
     report_dir = args.report_dir
     if report_dir is None and args.limit_blocks:
         report_dir = args.book_dir / "translation" / "review" / "smoke"
+    workers = args.workers
+    if workers is None:
+        workers = 1
+        if not args.no_preflight:
+            try:
+                workers = preflight_model.recommend_workers(args.model)
+            except Exception:
+                workers = 1
     client = ReviewModelClient(
         args.model,
         args.effort,
@@ -351,7 +368,7 @@ def main(argv: list[str] | None = None) -> None:
         args.book_dir,
         client,
         budget=args.budget,
-        workers=args.workers,
+        workers=workers,
         max_bisect_depth=args.max_bisect_depth,
         max_segment_retries=args.max_segment_retries,
         max_calls=args.max_calls,
@@ -363,6 +380,7 @@ def main(argv: list[str] | None = None) -> None:
     print(
         json.dumps(
             {
+                "workers": workers,
                 "summary": result["summary"],
                 "untraceable_issues": result["untraceable_issues"],
             },

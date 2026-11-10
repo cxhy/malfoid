@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import batch_translate
 import json_repair
 from batch_translate import DEFAULT_BATCH_BUDGET
 from model_client import call_client
@@ -83,6 +84,9 @@ def _protocol_contract(count: int) -> list[str]:
         "issues: an array of objects; each has an integer segment_index and a non-empty message.",
         "Each issue may also include optional subject and proposal strings: subject groups "
         "related issues across blocks, and proposal states the recommended fix.",
+        "Each issue must include category and severity. category is one of omission, "
+        "addition, mistranslation, semantic_reversal, consistency, terminology, style, "
+        "other; severity is one of high, medium, low.",
         "Report only substantive defects. Omit segments with no issue; never emit an "
         "issue whose proposal is 'No change needed'.",
         f"reviewed_segments: the integer {count}, matching the number of segments below.",
@@ -92,16 +96,42 @@ def _protocol_contract(count: int) -> list[str]:
     ]
 
 
-def build_review_prompt(block: list[dict[str, Any]], rules: str | None = None) -> str:
+def _glossary_text(terms: list[Any] | None) -> str:
+    """Format relevant glossary terms for a review prompt."""
+    lines: list[str] = []
+    for term in terms or []:
+        if not isinstance(term, dict):
+            continue
+        source = term.get("source") or term.get("id") or ""
+        target = term.get("target") or ""
+        if not source and not target:
+            continue
+        line = f"- {source}"
+        if target:
+            line += f" => {target}"
+        aliases = [alias for alias in term.get("aliases") or [] if isinstance(alias, str)]
+        if aliases:
+            line += f" (aliases: {', '.join(aliases)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_review_prompt(
+    block: list[dict[str, Any]], rules: str | None = None, glossary: str | None = None
+) -> str:
     """Build a numbered source/target review request for one block."""
     lines = [
         "TASK: REVIEW",
-        "Review these numbered source/target segment pairs for cross-chapter "
-        "consistency: term and name drift, pronoun and gender use, timeline and "
-        "character state, premature spoilers, AU rule breaks and tone drift.",
+        "Review these numbered source/target segment pairs for sentence-level "
+        "fidelity and cross-chapter consistency: omission, addition, mistranslation, "
+        "semantic reversal, term and spell accuracy, name drift, pronoun and gender "
+        "use, timeline and character state, premature spoilers, AU rule breaks and "
+        "tone drift.",
     ]
     if isinstance(rules, str) and rules.strip():
         lines.extend(["PROFILE RULES (must follow):", rules.strip(), ""])
+    if isinstance(glossary, str) and glossary.strip():
+        lines.extend(["GLOSSARY (canonical targets, must be followed):", glossary.strip(), ""])
     lines.extend(_protocol_contract(len(block)))
     for segment in block:
         lines.append(f"[{segment.get('index')}]")
@@ -306,10 +336,13 @@ def _clip_raw(raw: Any) -> str:
 
 
 def _review_once(
-    client: Any, block: list[dict[str, Any]], rules: str | None = None
+    client: Any,
+    block: list[dict[str, Any]],
+    rules: str | None = None,
+    glossary: str | None = None,
 ) -> dict[str, Any]:
     allowed = {segment.get("index") for segment in block}
-    raw = call_client(client, build_review_prompt(block, rules=rules))
+    raw = call_client(client, build_review_prompt(block, rules=rules, glossary=glossary))
     try:
         return validate_review_output(raw, len(block), allowed)
     except ReviewProtocolError as exc:
@@ -341,6 +374,7 @@ def _review_leaf(
     rules: str | None = None,
     trace=None,
     budget: _CallBudget | None = None,
+    glossary: str | None = None,
 ) -> list[dict[str, Any]]:
     """Review one block, bisecting protocol failures down to single segments."""
     if len(block) == 1:
@@ -351,7 +385,7 @@ def _review_leaf(
             if budget is not None and not budget.take():
                 return [_failure(block, "review call budget exhausted", attempts=0, depth=depth)]
             try:
-                payload = _review_once(client, block, rules)
+                payload = _review_once(client, block, rules, glossary)
             except ReviewProtocolError as exc:
                 last_error = _error_text(exc)
                 if trace is not None:
@@ -391,6 +425,7 @@ def _review_leaf(
                     rules,
                     trace,
                     budget,
+                    glossary,
                 )
             )
         return leaves
@@ -399,7 +434,7 @@ def _review_leaf(
     if budget is not None and not budget.take():
         return [_failure(block, "review call budget exhausted", attempts=0, depth=depth)]
     try:
-        payload = _review_once(client, block, rules)
+        payload = _review_once(client, block, rules, glossary)
     except ReviewProtocolError as exc:
         if trace is not None:
             trace(
@@ -422,6 +457,7 @@ def _review_leaf(
             rules,
             trace,
             budget,
+            glossary,
         ) + _review_leaf(
             client,
             block[midpoint:],
@@ -431,6 +467,7 @@ def _review_leaf(
             rules,
             trace,
             budget,
+            glossary,
         )
     if trace is not None:
         trace(
@@ -452,6 +489,7 @@ def review_block(
     max_segment_retries: int = DEFAULT_SEGMENT_RETRIES,
     max_calls: int | None = DEFAULT_MAX_CALLS,
     rules: str | None = None,
+    glossary: str | None = None,
     trace=None,
 ) -> dict[str, Any]:
     """Review one planned block and return its structured, deterministic result.
@@ -478,6 +516,7 @@ def review_block(
         rules=rules,
         trace=trace,
         budget=budget,
+        glossary=glossary,
     )
     issues: list[dict[str, Any]] = []
     for part in parts:
@@ -505,14 +544,18 @@ def review_block(
     }
 
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 
-def block_cache_key(block: list[dict[str, Any]], rules: str | None = None) -> str:
+def block_cache_key(
+    block: list[dict[str, Any]], rules: str | None = None, glossary: str | None = None
+) -> str:
     rules_hash = hashlib.sha256((rules or "").encode("utf-8")).hexdigest()
+    glossary_hash = hashlib.sha256((glossary or "").encode("utf-8")).hexdigest()
     payload = [
         CACHE_VERSION,
         rules_hash,
+        glossary_hash,
         *[
             (segment.get("index"), segment.get("source_hash"), segment.get("target"))
             for segment in block
@@ -545,6 +588,7 @@ def run_review(
     cache_dir: Path | None = None,
     trace_dir: Path | None = None,
     rules: str | None = None,
+    glossary_terms: list[Any] | None = None,
     limit_blocks: int | None = None,
 ) -> list[dict[str, Any]]:
     """Plan and review blocks in parallel, returning results in block order.
@@ -569,7 +613,10 @@ def run_review(
         trace_dir.mkdir(parents=True, exist_ok=True)
 
     def review_one(block: list[dict[str, Any]]) -> dict[str, Any]:
-        key = block_cache_key(block, rules)
+        glossary = _glossary_text(
+            batch_translate.relevant_glossary_terms(block, glossary_terms)
+        )
+        key = block_cache_key(block, rules, glossary)
         cache_path = cache_dir / f"{key}.json" if cache_dir is not None else None
         if cache_path is not None:
             cached = _read_cache(cache_path)
@@ -583,6 +630,7 @@ def run_review(
             max_segment_retries=max_segment_retries,
             max_calls=max_calls,
             rules=rules,
+            glossary=glossary,
             trace=events.append,
         )
         if trace_dir is not None:

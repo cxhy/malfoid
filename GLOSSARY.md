@@ -52,12 +52,15 @@ _Avoid_: 校对、proofread
 翻译前的整本书理解：章节 digest、style brief、synopsis、story bible。整本书源齐了再做。
 _Avoid_: 摘要、大纲
 
+**全局术语表（global glossary）**：
+仓库根 `glossary/hp.json` 的哈利波特原著正典基线，只收人民文学出版社通行译名和项目统一的性转马尔福规则；不收录系列特有、AU 或同人原创词。修改要单独审阅。
+
 **系列主表（series glossary）**：
-系列根下的术语主表，跨书共用。
+系列根下的术语主表，给本系列所有书共用；在全局表之上补充本系列特有词，必要时用 `override_global` 显式覆盖正典译名。
 _Avoid_: 全局术语表
 
 **书副本（book glossary）**：
-每本书 `work_temp/glossary.json` 的工作副本，从主表复制，书内新词先写副本，交付前回并主表。
+每本书 `work_temp/glossary.json` 的工作副本，由全局表 + 系列主表 + 本书本地补充合并而成；书内新词先写副本，交付前用 `sync_glossary.py --merge-back` 回并系列主表（不写全局表）。
 _Avoid_: 局部术语表
 
 **证据（evidence）**：

@@ -10,12 +10,15 @@ Nothing is stored in a database or daemon: the directory is the state.
 ## Work directory layout
 
 A series has one root directory; each book is a sub-work and the unit of execution
-(ADR 0001). Legacy single-book works keep the flat layout.
+(ADR 0001). Legacy single-book works keep the flat layout. The workspace global
+glossary lives at `glossary/hp.json` (tracked): canonical HP terms and the
+project-wide gender-swapped Malfoy rule only, never series-specific or AU terms.
 
 ```text
+glossary/hp.json                global canonical glossary (tracked)
 works/<series-id>-<slug>/
 ├── series.json               series title, author, book list, order, status
-├── glossary.json             series glossary master
+├── glossary.json             series master (global baseline + series terms/overrides)
 ├── story_bible.md            series-level reference
 └── books/book-NN/            one book per sub-work
     ├── meta.json             title, author, tags, rating, chapters, source URL
@@ -212,7 +215,10 @@ works/<series>/books/book-01/
 ```
 
 Stale chapter state is archived under `<book>/archive/<timestamp>/chapters/`, never
-inside the live `source/chapters/` directory.
+inside the live `source/chapters/` directory. Serialized range markers (``Ch 1-4``,
+``Ch18-19-20``) also record ``covered_chapters`` in the chapter state and meta
+record, so progress statistics and deterministic headings do not need to re-parse
+the title.
 
 ### Preview migration
 
@@ -242,10 +248,40 @@ Before a full review after changing the review prompt, effort or profile, run a
 one-block smoke test: `review_book_v2.py <book> --limit-blocks 1`. It writes only
 the first block under `translation/review/smoke/` and exits, so prompt
 regressions cost one block instead of a whole-book rerun and the full review
-reports stay untouched. The fixer reads confirmed issues from `translation/review/`,
+reports stay untouched. When `--workers` is omitted, the review runner probes the
+endpoint with `preflight_model.py` and uses the recommended worker count;
+`--no-preflight` forces one worker. The fixer reads confirmed issues from `translation/review/`,
 applies one target per affected segment, and records applied segments in
 `work_temp/fix_review/state.json`; reruns skip already-applied targets and exit
-0 with recorded failures unless `--strict` is passed.
+0 with recorded failures unless `--strict` is passed. Failed targets are written
+to `work_temp/fix_review/manual_queue.json` and `.md` for human triage. The
+fixer validates a corrected target against the source length, not the previous
+target, so a correct repair of an already-broken segment is not rejected.
+`--dry-run` is plan-only: it lists targets that would be fixed, checks saved
+state, and makes no model calls or writes. Before calling the model, the fixer
+compares the current target with the target recorded at review time and skips
+segments that were edited after review, so manual repairs are not overwritten. It only
+auto-fixes omission, addition, mistranslation, semantic reversal, consistency and
+terminology issues at high or medium severity; low-severity advisory checks and
+style suggestions are left for triage and listed separately. A confirmed issue whose review-time target contains a glossary `forbidden_targets` variant is a deterministic terminology violation and is collected even when marked low severity; other low-severity issues remain skipped.
+
+Translation saves chapter state after every completed batch, so an interrupted
+run keeps all finished batches. `--max-seconds N` stops gracefully between
+batches and returns `stopped=true`; rerunning the same command resumes from the
+saved state. Delivery derives chapter headings deterministically from the
+chapter marker (number and range), so model heading drift cannot reach the
+reader-facing Markdown.
+
+Glossary resolution is global → series → book. The global canonical table wins
+on canonical targets unless a series term sets `override_global`; series-only
+terms are added on top. Book-local terms supplement the series master and merge
+back with `sync_glossary.py --merge-back`, which never edits the global table.
+Translation loads the merged global + series + book glossary; polish injects the
+same relevant terms per batch. Review and fix load the same glossary plus
+unambiguous English→Chinese rows from the book and series story bibles; the
+glossary always wins on conflicts. `sync_glossary.py` refreshes a book copy, and
+ingest/prescan also synchronize it. Glossary entries may carry
+`forbidden_targets`, which the delivery verifier scans deterministically.
 
 `review_preview.py` plans review blocks over the whole preview, maps global review
 indices back to chapter/local positions, records alignment and false-positive
@@ -257,11 +293,14 @@ The full Markdown and single HTML are always kept. When the Markdown exceeds
 `--split-md-chars` (default 80,000 characters), delivery also writes balanced
 chapter-boundary parts as `translation/<title> - Part N.md`; parts never split
 inside a chapter, and an oversized chapter raises an error. Use `--no-split-md`
-to disable splitting.
+to disable splitting. Before writing, delivery runs `verify_book.py`: missing
+targets, forbidden names, English residue and glossary variants are errors that
+block delivery; heading-format issues are warnings. `--skip-verify` is only for
+debugging.
 
 The v2 review call injects the active profile's proofread and book-review rules
 (including the female-Draco contract) into every block prompt, so AU changes are
-not "corrected" back to canon. It uses JSON mode and a tolerant parser that
+not "corrected" back to canon. Review covers sentence-level fidelity (omission, addition, mistranslation, semantic reversal, term and spell accuracy) as well as cross-chapter consistency; v2 has no separate per-chunk proofread stage. Evidence verification also receives the canonical glossary, and a `terminology` candidate whose target or candidate text exactly hits a glossary `forbidden_targets` variant is confirmed deterministically without a model call. It uses JSON mode and a tolerant parser that
 accepts only boundary-only repairs (fence, missing outer delimiter); structural
 JSON repairs are rejected. A rejected block bisects recursively down to single segments, then
 retries each segment a bounded number of times. Every block writes a recovery
@@ -290,6 +329,13 @@ Other environment variables:
 Run `tools/preflight_model.py` before launching parallel work. It measures one
 concurrent pair against two sequential calls and prints the recommended worker
 count; the local endpoint is usually serial (`workers=1`).
+
+Default reasoning effort is `low` for translation and polish: quality comes first,
+and the local model's reasoning overhead is accepted for book-length work. Prescan
+and review default to `none` because their outputs are structural summaries or
+JSON checks, and low reasoning stalls large blocks on the local model. Post-review
+fixes also default to `low`, where the model has to judge and rewrite a specific
+flagged segment.
 
 This keeps the pipeline portable while preserving the original local-model workflow.
 

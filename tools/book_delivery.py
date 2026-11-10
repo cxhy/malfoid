@@ -17,6 +17,7 @@ from typing import Any
 
 import build_html
 import segment_state
+import verify_book
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def write_delivery(
     title: str | None = None,
     author: str | None = None,
     split_chars: int | None = 80000,
+    verify: bool = True,
 ) -> DeliveryResult:
     """Render Markdown and template HTML under ``translation/<title>``.
 
@@ -159,6 +161,10 @@ def write_delivery(
     is an error: parts never split inside a chapter.
     """
     book = Path(book_dir)
+    if verify:
+        report = verify_book.verify_book(book)
+        if not report["ok"]:
+            raise verify_book.DeliveryVerificationError(report)
     meta = _read_meta(book)
     resolved_title = title or str(meta.get("title") or book.name)
     resolved_author = author if author is not None else str(meta.get("author") or "")
@@ -195,14 +201,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--author")
     parser.add_argument("--split-md-chars", type=int, default=80000)
     parser.add_argument("--no-split-md", action="store_true")
+    parser.add_argument("--skip-verify", action="store_true")
     args = parser.parse_args(argv)
     split_chars = None if args.no_split_md else args.split_md_chars
-    result = write_delivery(
-        args.book_dir,
-        title=args.title,
-        author=args.author,
-        split_chars=split_chars,
-    )
+    try:
+        result = write_delivery(
+            args.book_dir,
+            title=args.title,
+            author=args.author,
+            split_chars=split_chars,
+            verify=not args.skip_verify,
+        )
+    except verify_book.DeliveryVerificationError as exc:
+        print(json.dumps(exc.report, ensure_ascii=False, indent=2))
+        raise SystemExit(1)
     print(f"markdown: {result.markdown}")
     print(f"html: {result.html}")
     for path in result.markdown_parts:

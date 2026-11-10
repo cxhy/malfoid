@@ -246,3 +246,20 @@ def test_translate_batch_injects_context_into_batch_and_fallback_prompts() -> No
     assert [result["target"] for result in results] == ["一", "二"]
     assert all("Draco => 德拉科" in prompt for prompt in client.prompts)
     assert all("Neighbour excerpt." in prompt for prompt in client.prompts)
+
+
+def test_translate_batch_calls_on_batch_for_each_planned_batch() -> None:
+    segments = [_segment(i, "x" * 10) for i in range(4)]
+    client = SequenceClient(
+        [
+            json.dumps({"complete": True, "targets": ["一", "二"]}),
+            json.dumps({"complete": True, "targets": ["三", "四"]}),
+        ]
+    )
+    seen: list[list[dict]] = []
+    results = batch_translate.translate_batch(
+        client, segments, budget=20, measure=len, on_batch=seen.append
+    )
+    assert len(seen) == 2
+    assert sum(len(batch) for batch in seen) == 4
+    assert len(results) == 4

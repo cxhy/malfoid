@@ -215,3 +215,20 @@ def test_polish_batch_propagates_client_errors() -> None:
     client = SequenceClient([RuntimeError("boom")])
     with pytest.raises(RuntimeError, match="boom"):
         polish_batch.polish_batch(client, segments, budget=2000)
+
+
+def test_build_polish_prompt_injects_relevant_glossary_terms() -> None:
+    segments = [_segment(0, "levicor...", "利维科……")]
+    prompt = polish_batch.build_polish_prompt(
+        segments,
+        glossary_terms=[
+            {
+                "id": "Levicorpus",
+                "source": "Levicorpus",
+                "target": "倒挂金钟",
+                "aliases": ["levicor"],
+            }
+        ],
+    )
+    assert "倒挂金钟" in prompt
+    assert "aliases: levicor" in prompt

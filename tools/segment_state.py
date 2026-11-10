@@ -25,10 +25,16 @@ DEFAULT_SEGMENT_TOKEN_BUDGET = 800
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _WATTPAD_MARKER_RE = re.compile(r"^\s*===\s*(.*?)\s*===\s*$")
 _CHAPTER_MARKER_RE = re.compile(
-    r"^\s*(?:ch(?:apter)?)\s*(\d+)\s*(?:[:.\-–—]\s*(.*?))?\s*$",
+    r"^\s*(?:ch(?:apter)?s?)\s*(\d+(?:\.\d+)?)(.*)$",
     re.IGNORECASE,
 )
-_CHAPTER_RANGE_RE = re.compile(r"(?:ch(?:apter)?s?)\s*(\d+)(?:\s*[-–—]\s*(\d+))?", re.IGNORECASE)
+_MARKER_TITLE_PREFIXES = (":", ".", "-", "–", "—", "+")
+_PARENTHETICAL_TITLE_RE = re.compile(r"^\([^)]*\)$")
+_CHAPTER_RANGE_RE = re.compile(
+    r"(?:ch(?:apter)?s?)\s*(\d+(?:\.\d+)?)(?:\s*[-–—]\s*(\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+_BOOK_LABEL_RE = re.compile(r"^\s*book\s+\d+\s*$", re.IGNORECASE)
 _SENTENCE_END_RE = re.compile(r"""[.!?]+["'”’)\]]*(?=\s|$)""")
 _WORD_BEFORE_RE = re.compile(r"([A-Za-z]+)$")
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc"})
@@ -36,6 +42,20 @@ _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "
 
 def source_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def chapter_number(value: int | float | str) -> int | float:
+    """Normalize a chapter number, keeping sub-chapters as decimals (23.5)."""
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
+def chapter_slug(value: int | float | str) -> str:
+    """Filesystem-safe chapter key: ``05`` for integers, ``23.5`` for decimals."""
+    number = chapter_number(value)
+    if isinstance(number, int):
+        return f"{number:02d}"
+    return f"{number:g}"
 
 
 def _parse_heading(line: str) -> tuple[int, str] | None:
@@ -48,29 +68,40 @@ def _parse_heading(line: str) -> tuple[int, str] | None:
     return None
 
 
-def _parse_chapter_marker(line: str) -> tuple[int, str] | None:
-    """Recognise serialized chapter markers such as ``Ch 6`` or ``Chapter 6: Title``."""
+def _parse_chapter_marker(line: str) -> tuple[int | float, str] | None:
+    """Recognise serialized markers such as ``Ch 6``, ``Ch 23.5`` or ``Ch 9 (Combination)``.
+
+    A marker is a short chapter label: after the number comes either nothing, a
+    title separator (``:``, ``.``, ``-``, ``+``) or a parenthetical tag. Prose
+    lines that merely start with ``Ch 30 ...`` are not chapter markers.
+    """
     m = _CHAPTER_MARKER_RE.match(line)
     if not m:
         return None
-    return int(m.group(1)), line.strip()
+    rest = m.group(2).strip()
+    if rest:
+        if rest[0] in _MARKER_TITLE_PREFIXES:
+            pass
+        elif not _PARENTHETICAL_TITLE_RE.match(rest):
+            return None
+    return chapter_number(m.group(1)), line.strip()
 
 
-def _chapter_range_start(text: str) -> int | None:
+def _chapter_range_start(text: str) -> int | float | None:
     """Return the first chapter number from a serialized segment title."""
     m = _CHAPTER_RANGE_RE.search(text)
-    return int(m.group(1)) if m else None
+    return chapter_number(m.group(1)) if m else None
 
 
-def _shift_marker_title(title: str, number: int) -> str:
+def _shift_marker_title(title: str, number: int | float) -> str:
     """Renumber a bare chapter marker while leaving custom titles untouched."""
-    m = re.fullmatch(r"\s*(Ch|Chapter)\s*\d+\s*", title, re.IGNORECASE)
+    m = re.fullmatch(r"\s*(Ch|Chapter)\s*\d+(?:\.\d+)?\s*", title, re.IGNORECASE)
     if not m:
         return title
     prefix = m.group(1)
     if prefix.islower():
         prefix = prefix.capitalize()
-    return f"{prefix} {number}"
+    return f"{prefix} {number:g}" if isinstance(number, float) else f"{prefix} {number}"
 
 
 def _is_sentence_end(text: str, match: re.Match[str]) -> bool:
@@ -258,8 +289,8 @@ def read_source(
     return parse_source(path.read_text(encoding="utf-8"), path.stem, max_segment_tokens)
 
 
-def chapter_path(book_dir: Path, number: int) -> Path:
-    return book_dir / "source" / CHAPTERS_DIR / f"ch-{number:02d}.json"
+def chapter_path(book_dir: Path, number: int | float) -> Path:
+    return book_dir / "source" / CHAPTERS_DIR / f"ch-{chapter_slug(number)}.json"
 
 
 def save_chapter(path: Path, chapter: dict) -> Path:
@@ -302,13 +333,89 @@ def logical_blocks(chapter: dict, translated: bool = False) -> list[dict]:
     return blocks
 
 
-def render_markdown(chapter: dict, translated: bool = False) -> str:
-    """Render logical blocks, merging continuation parts into one paragraph."""
+_CHAPTER_TITLE_RE = re.compile(
+    r"^\s*(?:ch(?:apter)?s?)\s*(\d+(?:\.\d+)?(?:\s*[-–—+]\s*\d+(?:\.\d+)?)*)"
+    r"\s*(?:\(.*\))?\s*$",
+    re.IGNORECASE,
+)
+_CHINESE_DIGITS = "零一二三四五六七八九"
+
+
+def _chinese_integer(number: int) -> str:
+    if 0 <= number < 10:
+        return _CHINESE_DIGITS[number]
+    if 10 <= number < 20:
+        return "十" + (_CHINESE_DIGITS[number % 10] if number % 10 else "")
+    if 20 <= number < 100:
+        return (
+            _CHINESE_DIGITS[number // 10]
+            + "十"
+            + (_CHINESE_DIGITS[number % 10] if number % 10 else "")
+        )
+    return str(number)
+
+
+def chinese_number(value: int | float) -> str:
+    """Render a chapter number in Chinese, keeping decimals as ``点`` digits."""
+    number = float(value)
+    if number.is_integer():
+        return _chinese_integer(int(number))
+    whole, _, fraction = f"{number:g}".partition(".")
+    return _chinese_integer(int(whole)) + "点" + "".join(
+        _CHINESE_DIGITS[int(digit)] for digit in fraction
+    )
+
+
+def chapter_marker_numbers(title: str) -> list[int | float]:
+    """Return the chapter numbers explicitly named in a serialized marker."""
+    match = _CHAPTER_TITLE_RE.match(str(title or "").strip())
+    if not match:
+        return []
+    return [chapter_number(value) for value in re.findall(r"\d+(?:\.\d+)?", match.group(1))]
+
+
+def display_chapter_heading(chapter: dict) -> str | None:
+    """Derive a deterministic heading from recorded or serialized chapter numbers.
+
+    Returns ``None`` for custom titles that are not chapter markers, so callers
+    keep the translated heading. Ranges collapse to first–last (``Ch18-19-20``
+    becomes ``第十八至二十章``).
+    """
+    numbers: list[int | float] = []
+    covered = chapter.get("covered_chapters")
+    if isinstance(covered, list):
+        for value in covered:
+            try:
+                numbers.append(chapter_number(value))
+            except (TypeError, ValueError):
+                continue
+    if not numbers:
+        numbers = chapter_marker_numbers(str(chapter.get("title") or ""))
+    if not numbers:
+        return None
+    if len(numbers) == 1:
+        return f"第{chinese_number(numbers[0])}章"
+    return f"第{chinese_number(numbers[0])}至{chinese_number(numbers[-1])}章"
+
+
+def render_markdown(
+    chapter: dict, translated: bool = False, heading_text: str | None = None
+) -> str:
+    """Render logical blocks, merging continuation parts into one paragraph.
+
+    ``heading_text`` replaces the first heading block only, so delivery can use a
+    deterministic chapter heading instead of the model's heading translation.
+    """
     parts: list[str] = []
+    heading_used = False
     for block in logical_blocks(chapter, translated=translated):
         if block["kind"] == "heading":
             level = int(block.get("level") or chapter.get("heading_level") or 1)
-            parts.append(f"{'#' * level} {block['text']}")
+            text = block["text"]
+            if heading_text is not None and not heading_used:
+                text = heading_text
+                heading_used = True
+            parts.append(f"{'#' * level} {text}")
         else:
             parts.append(block["text"])
     return "\n\n".join(parts)
@@ -335,25 +442,39 @@ def verify_round_trip(
     return left == right
 
 
-def _chapter_sort_key(path: Path) -> int:
-    m = re.search(r"(\d+)$", path.stem)
-    return int(m.group(1)) if m else 0
+def _chapter_sort_key(path: Path) -> float:
+    m = re.search(r"(\d+(?:\.\d+)?)$", path.stem)
+    return float(m.group(1)) if m else 0.0
 
 
 def render_book(book_dir: Path, translated: bool = False) -> str:
-    """Render a whole book in source mode, or targets with ``translated=True``."""
+    """Render a whole book in source mode, or targets with ``translated=True``.
+
+    Translated delivery derives chapter headings deterministically from the
+    chapter marker (number and range), so model heading drift cannot reach the
+    reader-facing file. Custom non-marker titles keep their translated heading.
+    """
     chapters_dir = book_dir / "source" / CHAPTERS_DIR
     paths = sorted(chapters_dir.glob("ch-*.json"), key=_chapter_sort_key)
     chapters = [load_chapter(path) for path in paths]
-    return "\n\n".join(render_markdown(chapter, translated=translated) for chapter in chapters)
+    parts = []
+    for chapter in chapters:
+        heading_text = display_chapter_heading(chapter) if translated else None
+        parts.append(render_markdown(chapter, translated=translated, heading_text=heading_text))
+    return "\n\n".join(parts)
 
 
 def _chapter_record(chapter: dict) -> dict:
     text = chapter_text(chapter)
     blocks = logical_blocks(chapter)
+    index = chapter_number(chapter.get("chapter") or 0)
+    covered = chapter.get("covered_chapters")
+    if not isinstance(covered, list) or not covered:
+        covered = chapter_marker_numbers(str(chapter.get("title") or "")) or [index]
     return {
-        "index": int(chapter.get("chapter") or 0),
+        "index": index,
         "title": chapter.get("title") or "",
+        "covered_chapters": [chapter_number(value) for value in covered],
         "source_hash": source_hash(text),
         "paragraph_count": sum(1 for block in blocks if block["kind"] == "text"),
         "segment_count": len(chapter.get("segments") or []),
@@ -410,11 +531,13 @@ def _parse_serialized_source(
                 current["segments"].append(_segment(len(current["segments"]), "text", body))
             para = []
 
-    def start_chapter(number: int, title: str) -> None:
+    def start_chapter(number: int | float, title: str) -> None:
         nonlocal current
         flush_para()
         current = _new_chapter(title, 1, [_segment(0, "heading", title, 1)])
         current["chapter"] = number
+        covered = chapter_marker_numbers(title)
+        current["covered_chapters"] = covered or [number]
         chapters.append(current)
 
     for line in lines:
@@ -430,7 +553,14 @@ def _parse_serialized_source(
         if current is None:
             if line.strip() == "":
                 continue
-            start_chapter(inferred_start, f"Ch {inferred_start}")
+            # A bare "Book 2" line before the first chapter marker is a book
+            # label, not the opening paragraph of an inferred chapter.
+            if _BOOK_LABEL_RE.match(line):
+                continue
+            inferred_label = (
+                f"Ch {inferred_start:g}" if isinstance(inferred_start, float) else f"Ch {inferred_start}"
+            )
+            start_chapter(inferred_start, inferred_label)
         if line.strip() == "":
             flush_para()
         else:
@@ -474,18 +604,18 @@ def ingest_sources(
         )
         chapters.extend(parsed)
         if parsed:
-            next_start = max(int(chapter["chapter"]) for chapter in parsed) + 1
+            next_start = int(max(chapter_number(chapter["chapter"]) for chapter in parsed)) + 1
 
-    numbers = [int(chapter["chapter"]) for chapter in chapters]
+    numbers = [chapter_number(chapter["chapter"]) for chapter in chapters]
     if len(set(numbers)) != len(numbers):
         raise ValueError("duplicate chapter numbers across source files")
-    chapters.sort(key=lambda chapter: int(chapter["chapter"]))
+    chapters.sort(key=lambda chapter: chapter_number(chapter["chapter"]))
 
     chapters_dir = book_dir / "source" / CHAPTERS_DIR
     chapters_dir.mkdir(parents=True, exist_ok=True)
     paths_out: list[Path] = []
     for chapter in chapters:
-        path = chapter_path(book_dir, int(chapter["chapter"]))
+        path = chapter_path(book_dir, chapter_number(chapter["chapter"]))
         save_chapter(path, chapter)
         paths_out.append(path)
 
@@ -532,7 +662,7 @@ def ingest_source(
     chapters_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for chapter in chapters:
-        path = chapter_path(book_dir, int(chapter["chapter"]))
+        path = chapter_path(book_dir, chapter_number(chapter["chapter"]))
         save_chapter(path, chapter)
         paths.append(path)
 

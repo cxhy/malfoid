@@ -69,8 +69,9 @@ def digest_cache_path(book_dir: Path, source_hash: str) -> Path:
     return digests_dir(book_dir) / f"{source_hash}.md"
 
 
-def chapter_digest_path(book_dir: Path, number: int) -> Path:
-    return prescan_dir(book_dir) / CHAPTER_DIGESTS_DIR / f"ch-{number:02d}.md"
+def chapter_digest_path(book_dir: Path, number: int | float) -> Path:
+    slug = segment_state.chapter_slug(number)
+    return prescan_dir(book_dir) / CHAPTER_DIGESTS_DIR / f"ch-{slug}.md"
 
 
 def style_brief_path(book_dir: Path) -> Path:
@@ -92,13 +93,13 @@ def _read_meta(book_dir: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _meta_chapter_numbers(meta: dict) -> list[int]:
-    numbers: list[int] = []
+def _meta_chapter_numbers(meta: dict) -> list[int | float]:
+    numbers: list[int | float] = []
     for entry in meta.get("chapters") or []:
         index = entry.get("index")
         if index is None:
             return []
-        numbers.append(int(index))
+        numbers.append(segment_state.chapter_number(index))
     return sorted(numbers)
 
 
@@ -170,16 +171,15 @@ def plan_digests(book_dir: Path) -> list[dict]:
         chapter = segment_state.load_chapter(segment_state.chapter_path(book_dir, number))
         source_hash = chapter_source_hash(chapter)
         cache_path = digest_cache_path(book_dir, source_hash)
+        chapter_number = segment_state.chapter_number(chapter.get("chapter") or number)
         plan.append(
             {
-                "chapter": int(chapter.get("chapter") or number),
+                "chapter": chapter_number,
                 "title": chapter.get("title") or "",
                 "source_hash": source_hash,
                 "source_text": chapter_source_text(chapter),
                 "cache_path": cache_path,
-                "chapter_path": chapter_digest_path(
-                    book_dir, int(chapter.get("chapter") or number)
-                ),
+                "chapter_path": chapter_digest_path(book_dir, chapter_number),
                 "cached": _cached_digest(cache_path) is not None,
             }
         )
@@ -297,6 +297,7 @@ def run_prescan(
     series-level bible immediately.
     """
     _require_ready(book_dir)
+    book_state.sync_glossary(book_dir)
     digests = run_digests(book_dir, client, workers=workers)
     context = _digest_context(digests)
     title = _book_title(book_dir)
@@ -390,7 +391,7 @@ def main() -> None:
         "--model",
         default=os.environ.get("MALFOID_MODEL", "DeepSeek-V4.1-Flash-1017-TensorFold-Zig"),
     )
-    ap.add_argument("--effort", default="low")
+    ap.add_argument("--effort", default="none")
     ap.add_argument("--max-tokens", type=int, default=32768)
     args = ap.parse_args()
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from model_client import call_client
 from token_budget import estimate_tokens
@@ -78,6 +78,20 @@ def _term_parts(term: Any) -> tuple[str, str, list[str]]:
     return text, "", []
 
 
+def _needle_occurs(needle: str, haystack: str) -> bool:
+    """Match a glossary needle as a whole token when it contains Latin letters.
+
+    A plain substring test makes short names select unrelated prose (``Ron`` in
+    ``wrong``, ``Cho`` in ``school``, ``Lee`` in ``little``). Latin-letter needles
+    therefore require non-alphanumeric boundaries; needles without Latin letters
+    keep the substring behaviour.
+    """
+    if not re.search(r"[A-Za-z]", needle):
+        return needle.casefold() in haystack
+    pattern = r"(?<![A-Za-z0-9])" + re.escape(needle) + r"(?![A-Za-z0-9])"
+    return re.search(pattern, haystack, re.IGNORECASE) is not None
+
+
 def relevant_glossary_terms(
     segments: list[dict[str, Any]], glossary_terms: list[Any] | None
 ) -> list[Any]:
@@ -91,7 +105,7 @@ def relevant_glossary_terms(
         if not source and not target:
             continue
         needles = [source, *aliases]
-        if not any(needle and needle.casefold() in haystack for needle in needles):
+        if not any(needle and _needle_occurs(needle, haystack) for needle in needles):
             continue
         selected.append(term)
     return selected
@@ -278,6 +292,7 @@ def translate_batch(
     glossary_terms: list[Any] | None = None,
     context: str | None = None,
     rules: str | None = None,
+    on_batch: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Translate segments with an equal-length completeness contract.
 
@@ -285,7 +300,9 @@ def translate_batch(
     batch cannot be planned or all attempts fail, every segment gets one fallback
     call. Optional glossary terms and neighbour context are injected into every
     prompt; only glossary entries relevant to that batch are listed. The returned
-    list follows input order and contains one result per segment.
+    list follows input order and contains one result per segment. ``on_batch`` is
+    called with each batch's results as soon as they are ready, so callers can
+    persist progress before the whole chapter finishes.
     """
     segments = list(segments)
     if not segments:
@@ -293,10 +310,14 @@ def translate_batch(
     try:
         batches = plan_batch(segments, budget, measure)
     except ValueError:
-        return _fallback(client, segments, glossary_terms, context, rules)
+        results = _fallback(client, segments, glossary_terms, context, rules)
+        if on_batch is not None:
+            on_batch(results)
+        return results
 
     results: list[dict[str, Any]] = []
     for batch in batches:
+        batch_results: list[dict[str, Any]] = []
         attempts = 0
         for _ in range(max_retries + 1):
             attempts += 1
@@ -313,12 +334,15 @@ def translate_batch(
             except ProtocolError:
                 continue
             for segment, target in zip(batch, targets):
-                results.append(
+                batch_results.append(
                     _result(segment, target=target, error=None, attempts=attempts, stage="batch")
                 )
             break
         else:
-            results.extend(_fallback(client, batch, glossary_terms, context, rules))
+            batch_results.extend(_fallback(client, batch, glossary_terms, context, rules))
+        results.extend(batch_results)
+        if on_batch is not None:
+            on_batch(batch_results)
 
     return results
 

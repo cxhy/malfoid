@@ -110,3 +110,51 @@ def test_translate_book_writes_progress_rows(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert [row["chapter"] for row in rows] == [1, 2]
     assert all(row["translated"] > 0 for row in rows)
+
+
+def test_translate_book_loads_the_merged_master_glossary(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+    root = book.parent.parent
+    master = {
+        "version": 2,
+        "high_frequency_top_n": 20,
+        "applied_meta_hashes": {},
+        "terms": [
+            {
+                "id": "paragraph",
+                "source": "paragraph",
+                "target": "段落",
+                "aliases": [],
+                "category": "term",
+                "gender": "unknown",
+                "confidence": "high",
+                "frequency": 1,
+                "evidence_refs": [],
+                "notes": "",
+            }
+        ],
+    }
+    (root / "glossary.json").write_text(
+        json.dumps(master, ensure_ascii=False), encoding="utf-8"
+    )
+    client = FakeClient()
+    translate_book_v2.translate_book(book, client)
+    assert any("段落" in prompt for prompt in client.calls)
+
+
+def test_translate_book_saves_per_batch_and_stops_on_time_budget(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+    client = FakeClient()
+    summary = translate_book_v2.translate_book(book, client, max_seconds=0)
+    assert summary["stopped"] is True
+    assert summary["translated"] == 3
+    chapter1 = segment_state.load_chapter(segment_state.chapter_path(book, 1))
+    assert all((segment.get("target") or "").strip() for segment in chapter1["segments"])
+    chapter2 = segment_state.load_chapter(segment_state.chapter_path(book, 2))
+    assert not any((segment.get("target") or "").strip() for segment in chapter2["segments"])
+
+    resumed = translate_book_v2.translate_book(book, client)
+    assert resumed["stopped"] is False
+    assert resumed["translated"] == 2
+    chapter2 = segment_state.load_chapter(segment_state.chapter_path(book, 2))
+    assert all((segment.get("target") or "").strip() for segment in chapter2["segments"])

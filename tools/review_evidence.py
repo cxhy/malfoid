@@ -17,6 +17,7 @@ import json
 import re
 from typing import Any
 
+import segment_state
 from model_client import call_client
 
 MAX_EVIDENCE_ROUNDS = 2
@@ -80,15 +81,15 @@ def candidate_id(candidate: dict[str, Any]) -> str:
     return "cand-" + hashlib.sha256(encoded).hexdigest()[:12]
 
 
-def _chapter_number(chapter: dict[str, Any], position: int) -> int:
+def _chapter_number(chapter: dict[str, Any], position: int) -> int | float:
     number = chapter.get("chapter")
-    return int(number) if number is not None else position + 1
+    return segment_state.chapter_number(number) if number is not None else position + 1
 
 
 def _locate_anchor(
     candidate: dict[str, Any], chapters: list[dict[str, Any]]
-) -> tuple[int, dict[str, Any], int, dict[str, Any]]:
-    target_chapter = int(candidate.get("chapter"))
+) -> tuple[int | float, dict[str, Any], int, dict[str, Any]]:
+    target_chapter = segment_state.chapter_number(candidate.get("chapter"))
     target_index = int(candidate.get("segment_index"))
     for position, chapter in enumerate(chapters):
         number = _chapter_number(chapter, position)
@@ -104,12 +105,12 @@ def _locate_anchor(
     )
 
 
-def _evidence_ref(chapter: int, segment: dict[str, Any], reason: str) -> dict[str, Any]:
+def _evidence_ref(chapter: int | float, segment: dict[str, Any], reason: str) -> dict[str, Any]:
     index = int(segment.get("index", 0))
     return {
         "chapter": chapter,
         "segment_index": index,
-        "ref": f"ch-{chapter:02d}:{index}",
+        "ref": f"ch-{segment_state.chapter_slug(chapter)}:{index}",
         "kind": segment.get("kind"),
         "source": segment.get("source") or "",
         "target": segment.get("target"),
@@ -121,8 +122,8 @@ def _ref_size(ref: dict[str, Any]) -> int:
     return len(ref.get("source") or "") + len(ref.get("target") or "")
 
 
-def _ref_key(ref: dict[str, Any]) -> tuple[int, int]:
-    return int(ref.get("chapter")), int(ref.get("segment_index"))
+def _ref_key(ref: dict[str, Any]) -> tuple[int | float, int]:
+    return segment_state.chapter_number(ref.get("chapter")), int(ref.get("segment_index"))
 
 
 def _excluded_keys(exclude: list[dict[str, Any]] | None) -> set[tuple[int, int]]:
@@ -178,6 +179,101 @@ def _matched_term(source: str, target: str, terms: list[str]) -> str | None:
         if any(needle in haystack for haystack in haystacks):
             return term
     return None
+
+
+def _glossary_variants(terms: list[Any] | None) -> list[tuple[str, str]]:
+    """Return (term id, forbidden variant) pairs from glossary terms."""
+    variants: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for term in terms or []:
+        if not isinstance(term, dict):
+            continue
+        term_id = str(term.get("id") or term.get("source") or "")
+        canonical = str(term.get("target") or "")
+        for variant in term.get("forbidden_targets") or []:
+            if not isinstance(variant, str) or not variant.strip():
+                continue
+            value = variant.strip()
+            if canonical and value in canonical:
+                continue
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append((term_id, value))
+    return variants
+
+
+def _glossary_text(terms: list[Any] | None) -> str:
+    """Format glossary terms for an evidence prompt."""
+    lines: list[str] = []
+    for term in terms or []:
+        if not isinstance(term, dict):
+            continue
+        source = str(term.get("source") or term.get("id") or "")
+        target = str(term.get("target") or "")
+        if not source and not target:
+            continue
+        line = f"- {source}"
+        if target:
+            line += f" => {target}"
+        aliases = [str(alias) for alias in term.get("aliases") or [] if str(alias).strip()]
+        if aliases:
+            line += f" (aliases: {', '.join(aliases)})"
+        forbidden = [str(value) for value in term.get("forbidden_targets") or [] if str(value).strip()]
+        if forbidden:
+            line += f" (forbidden: {', '.join(forbidden)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _deterministic_terminology_result(
+    candidate: dict[str, Any],
+    chapters: list[dict[str, Any]],
+    glossary_terms: list[Any] | None,
+) -> dict[str, Any] | None:
+    """Confirm a terminology candidate when it hits a glossary forbidden variant.
+
+    The glossary is project-authoritative for terminology, so an exact forbidden
+    variant hit does not need a model verdict. This only applies to candidates
+    explicitly categorized as ``terminology``; ordinary term suggestions still go
+    through evidence verification.
+    """
+    if str(candidate.get("category") or "").strip().lower() != "terminology":
+        return None
+    variants = _glossary_variants(glossary_terms)
+    if not variants:
+        return None
+    chapter, _, _, segment = _locate_anchor(candidate, chapters)
+    text = "\n".join(
+        [
+            str(segment.get("target") or ""),
+            str(candidate.get("message") or ""),
+            str(candidate.get("proposal") or ""),
+        ]
+    )
+    hit = next(((term_id, variant) for term_id, variant in variants if variant in text), None)
+    if hit is None:
+        return None
+    term_id, variant = hit
+    return {
+        "candidate": candidate,
+        "id": candidate_id(candidate),
+        "status": "confirmed",
+        "verified": True,
+        "needs_human": False,
+        "rounds": 0,
+        "reason": (
+            f"glossary variant {variant!r} for term {term_id!r} appears in the "
+            "target or candidate text; deterministic confirmation"
+        ),
+        "requested_terms": [],
+        "evidence": [
+            _evidence_ref(chapter, segment, f"glossary forbidden variant: {variant}")
+        ],
+        "error": None,
+        "deterministic": True,
+    }
 
 
 def select_evidence(
@@ -298,6 +394,7 @@ def build_evidence_prompt(
     evidence: list[dict[str, Any]],
     round_number: int,
     max_rounds: int,
+    glossary: str | None = None,
 ) -> str:
     """Build one evidence verification request."""
     lines = [
@@ -312,8 +409,10 @@ def build_evidence_prompt(
         f"Segment: {candidate.get('segment_index')}",
         f"Message: {candidate.get('message') or ''}",
         f"Proposal: {candidate.get('proposal') or ''}",
-        "Evidence:",
     ]
+    if isinstance(glossary, str) and glossary.strip():
+        lines.extend(["GLOSSARY (canonical targets):", glossary.strip(), ""])
+    lines.append("Evidence:")
     for ref in evidence:
         lines.append(
             f"[{ref['ref']}] chapter={ref['chapter']} "
@@ -397,17 +496,24 @@ def verify_candidate(
     max_refs: int = DEFAULT_MAX_EVIDENCE_REFS,
     max_chars: int = DEFAULT_MAX_EVIDENCE_CHARS,
     focus_terms: list[str] | None = None,
+    glossary_terms: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Verify one candidate against evidence, with at most two rounds.
 
     A confirmed candidate is reported as verified, a rejected one is not, and a
     candidate that still needs evidence after the final round, or whose model
-    output is unusable, is marked unresolved for a human decision.
+    output is unusable, is marked unresolved for a human decision. Terminology
+    candidates that hit a glossary forbidden variant are confirmed deterministically
+    without a model call.
     """
     if not 1 <= max_rounds <= MAX_EVIDENCE_ROUNDS:
         raise ValueError(f"max_rounds must be between 1 and {MAX_EVIDENCE_ROUNDS}")
 
     candidate = dict(candidate)
+    deterministic = _deterministic_terminology_result(candidate, chapters, glossary_terms)
+    if deterministic is not None:
+        return deterministic
+
     evidence = select_evidence(
         candidate,
         chapters,
@@ -415,6 +521,7 @@ def verify_candidate(
         max_refs=max_refs,
         max_chars=max_chars,
     )
+    glossary = _glossary_text(glossary_terms)
 
     status = "unresolved"
     reason = ""
@@ -424,7 +531,7 @@ def verify_candidate(
 
     for round_number in range(1, max_rounds + 1):
         rounds = round_number
-        prompt = build_evidence_prompt(candidate, evidence, round_number, max_rounds)
+        prompt = build_evidence_prompt(candidate, evidence, round_number, max_rounds, glossary)
         try:
             payload = validate_evidence_output(call_client(client, prompt))
         except Exception as exc:
@@ -480,6 +587,7 @@ def verify_candidates(
     max_rounds: int = DEFAULT_EVIDENCE_ROUNDS,
     max_refs: int = DEFAULT_MAX_EVIDENCE_REFS,
     max_chars: int = DEFAULT_MAX_EVIDENCE_CHARS,
+    glossary_terms: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Verify candidates in their original order."""
     return [
@@ -490,6 +598,7 @@ def verify_candidates(
             max_rounds=max_rounds,
             max_refs=max_refs,
             max_chars=max_chars,
+            glossary_terms=glossary_terms,
         )
         for candidate in candidates
     ]
@@ -501,7 +610,10 @@ def _block_segments(
     if isinstance(block, dict):
         segments = list(block.get("segments") or [])
         chapter = block.get("chapter")
-        return segments, int(chapter) if chapter is not None else None
+        return (
+            segments,
+            segment_state.chapter_number(chapter) if chapter is not None else None,
+        )
     return list(block or []), None
 
 
@@ -521,14 +633,14 @@ def collect_candidates(
     candidates: list[dict[str, Any]] = []
     for block_index, (review, block) in enumerate(zip(reviews, blocks)):
         segments, default_chapter = _block_segments(block)
-        chapter_by_index: dict[int, int] = {}
+        chapter_by_index: dict[int, int | float] = {}
         for segment in segments:
             index = segment.get("index")
             chapter = segment.get("chapter", default_chapter)
             if index is None or chapter is None:
                 continue
             index = int(index)
-            chapter = int(chapter)
+            chapter = segment_state.chapter_number(chapter)
             if index in chapter_by_index and chapter_by_index[index] != chapter:
                 raise ValueError(
                     f"block {block_index} has ambiguous segment index {index} across chapters"
@@ -550,7 +662,7 @@ def collect_candidates(
                 "proposal": proposal,
                 "block": block_index,
             }
-            for field in ("subject", "conflict_key"):
+            for field in ("subject", "conflict_key", "category", "severity"):
                 if issue.get(field):
                     candidate[field] = issue[field]
             focus_terms = issue.get("focus_terms")
@@ -578,9 +690,9 @@ def _conflict_key(candidate: dict[str, Any]) -> str:
         return str(candidate["conflict_key"])
     if candidate.get("subject"):
         return f"subject:{candidate['subject']}"
-    chapter = int(candidate.get("chapter"))
+    chapter = segment_state.chapter_number(candidate.get("chapter"))
     segment = int(candidate.get("segment_index"))
-    return f"ch{chapter:02d}:s{segment}"
+    return f"ch{segment_state.chapter_slug(chapter)}:s{segment}"
 
 
 def _proposal_text(candidate: dict[str, Any]) -> str:

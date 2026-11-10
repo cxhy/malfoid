@@ -4,9 +4,10 @@
 Usage:
     .venv/bin/python tools/export_glossary.py works/<work-dir> [more work dirs]
 
-Reads <work>/work_temp/glossary.json (the canonical, progressively updated
-term table) and writes <work>/glossary.md. The JSON stays the source of truth
-for translation; the Markdown is the reader/reviewer-facing table.
+Reads the effective glossary for a v2 series book (global + series + book) and
+writes <work>/glossary.md. For legacy flat works it falls back to
+<work>/work_temp/glossary.json. The JSON stays the source of truth for
+translation; the Markdown is the reader/reviewer-facing table.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+
+import book_state
 
 CATEGORY_LABEL = {
     "person": "人物",
@@ -27,9 +30,12 @@ CATEGORY_ORDER = ["person", "place", "creature", "object", "concept"]
 
 def export(work: Path) -> Path:
     glossary_path = work / "work_temp" / "glossary.json"
-    if not glossary_path.is_file():
-        raise FileNotFoundError(f"missing glossary: {glossary_path}")
-    terms = json.loads(glossary_path.read_text(encoding="utf-8"))["terms"]
+    if book_state.is_series_root(work.parent.parent):
+        terms = book_state.load_glossary_terms(work)
+    else:
+        if not glossary_path.is_file():
+            raise FileNotFoundError(f"missing glossary: {glossary_path}")
+        terms = json.loads(glossary_path.read_text(encoding="utf-8"))["terms"]
 
     groups: dict[str, list[dict]] = {}
     for t in terms:
