@@ -6,6 +6,7 @@ works/
 Green_and_Silver/
 The_girl_who_loved_the_boy_who_lived/
 How_I_Met_Your_Mother/
+Worst Enemy/
 The_Boy_Who_Loved_the/
 
 # Input books and generated documents (never commit)
@@ -20,7 +21,6 @@ Harry Potter and the Sorcerer's Tsundere/
 # Local agent runtime and machine-specific settings
 .pi/settings.json
 .pi/agent/
-AGENTS.md
 .venv/
 venv/
 
