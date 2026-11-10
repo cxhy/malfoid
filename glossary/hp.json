@@ -566,7 +566,8 @@
       "source": "Nimbus Two Thousand and One",
       "target": "光轮2001",
       "aliases": [
-        "Nimbus 2001"
+        "Nimbus 2001",
+        "Nimbus Two Thousand and Ones"
       ],
       "category": "object",
       "confidence": "high",
@@ -1284,6 +1285,21 @@
       "frequency": 0,
       "evidence_refs": [],
       "notes": ""
+    },
+    {
+      "id": "Finch-Fletchley",
+      "source": "Finch-Fletchley",
+      "target": "芬奇-弗莱奇",
+      "aliases": [],
+      "category": "person",
+      "confidence": "high",
+      "gender": "unknown",
+      "frequency": 0,
+      "evidence_refs": [],
+      "notes": "姓氏；Justin Finch-Fletchley 全名见该词条。",
+      "forbidden_targets": [
+        "芬奇-弗莱彻"
+      ]
     },
     {
       "id": "Fleur",
@@ -3016,6 +3032,18 @@
       "notes": ""
     },
     {
+      "id": "Serpensortia",
+      "source": "Serpensortia",
+      "target": "蛇蛇攻",
+      "aliases": [],
+      "category": "spell",
+      "confidence": "high",
+      "gender": "unknown",
+      "frequency": 0,
+      "evidence_refs": [],
+      "notes": "官方译名；咒语本身。"
+    },
+    {
       "id": "Silencing Charm",
       "source": "Silencing Charm",
       "target": "闭耳塞听",
@@ -3080,6 +3108,21 @@
       "frequency": 1,
       "evidence_refs": [],
       "notes": ""
+    },
+    {
+      "id": "Care of Magical Creatures",
+      "source": "Care of Magical Creatures",
+      "target": "保护神奇生物课",
+      "aliases": [],
+      "category": "term",
+      "confidence": "high",
+      "gender": "unknown",
+      "frequency": 0,
+      "evidence_refs": [],
+      "notes": "官方课程名；统一译作保护神奇生物课。",
+      "forbidden_targets": [
+        "神奇动物保护课"
+      ]
     },
     {
       "id": "Champion",
