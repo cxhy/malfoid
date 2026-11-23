@@ -607,3 +607,16 @@ def test_build_review_prompt_requires_sentence_level_fidelity() -> None:
         assert phrase in prompt
     assert "sentence-level fidelity" in prompt
     assert "only cross-chapter" not in prompt
+
+
+def test_no_issue_rejects_chinese_confirmation_entries() -> None:
+    assert review_blocks._is_no_issue(
+        {"message": "“女贞路”对应 Privet Drive，正确。", "proposal": "无需修改。"}
+    )
+    assert review_blocks._is_no_issue(
+        {"message": "译文可接受。", "proposal": "无需修改，达力正确。"}
+    )
+    assert review_blocks._is_no_issue({"message": "译名正确。", "proposal": "保持不变"})
+    assert not review_blocks._is_no_issue(
+        {"message": "原文是 Privet Drive，译文写成女贞路，术语表要求女贞路。", "proposal": "改为女贞路。"}
+    )

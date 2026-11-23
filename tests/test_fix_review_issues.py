@@ -495,3 +495,72 @@ def test_collect_targets_still_skips_low_severity_without_glossary_variant(
     )
     assert targets == []
     assert skipped[0]["reason"] == "low severity: low"
+
+
+def test_validate_fix_rejects_a_confirmed_variant_and_requires_canonical() -> None:
+    glossary = [
+        {
+            "id": "Alyza Twigs",
+            "source": "Alyza Twigs",
+            "target": "阿莉莎·特威格斯",
+            "aliases": ["Alyza"],
+            "forbidden_targets": ["艾莉莎", "阿莉扎"],
+        }
+    ]
+    target = fix_review_issues.FixTarget(
+        1,
+        0,
+        "Alyza waited.",
+        "艾莉莎等待着。",
+        [{"category": "consistency", "severity": "medium"}],
+    )
+    with pytest.raises(ValueError, match="forbidden variant"):
+        fix_review_issues.validate_fix(target, "艾莉莎等待着。", glossary)
+    fix_review_issues.validate_fix(target, "阿莉莎等待着。", glossary)
+
+
+def test_validate_fix_rejects_an_unrelated_forbidden_variant() -> None:
+    glossary = [
+        {
+            "id": "Hospital Wing",
+            "source": "Hospital Wing",
+            "target": "校医院",
+            "forbidden_targets": ["医疗翼"],
+        }
+    ]
+    target = fix_review_issues.FixTarget(1, 0, "Harry waited.", "哈利等待着。", [])
+    with pytest.raises(ValueError, match="forbidden variant"):
+        fix_review_issues.validate_fix(target, "哈利在医疗翼等待着。", glossary)
+
+
+def test_validate_fix_respects_forbidden_source_scope() -> None:
+    glossary = [
+        {
+            "id": "Great Hall",
+            "source": "Great Hall",
+            "target": "礼堂",
+            "forbidden_targets": ["大厅"],
+            "forbidden_source_scoped": True,
+        }
+    ]
+    unrelated = fix_review_issues.FixTarget(
+        1, 0, "The hall was empty.", "大厅空着。", []
+    )
+    fix_review_issues.validate_fix(unrelated, "大厅空着。", glossary)
+    related = fix_review_issues.FixTarget(
+        1, 1, "The Great Hall was empty.", "大厅空着。", []
+    )
+    with pytest.raises(ValueError, match="forbidden variant"):
+        fix_review_issues.validate_fix(related, "大厅空着。", glossary)
+
+
+def test_glossary_variants_ignore_variant_inside_canonical() -> None:
+    terms = [
+        {
+            "id": "Dracina",
+            "source": "Dracina",
+            "target": "德拉科妮娅",
+            "forbidden_targets": ["德拉科"],
+        }
+    ]
+    assert fix_review_issues._glossary_variants(terms) == []

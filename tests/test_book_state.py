@@ -409,3 +409,52 @@ def test_merge_glossary_back_merges_forbidden_targets(tmp_path: Path) -> None:
     by_id = {term["id"]: term for term in merged["terms"]}
     assert by_id["Kwikspell"]["forbidden_targets"] == ["快速咒语课程"]
     assert result == {"added": 0, "updated": 1, "conflicts": []}
+
+
+def test_merge_glossary_back_merges_canonical_forms(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [])
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Ministry", "魔法部")),
+    )
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(
+            _term(
+                "Ministry",
+                "魔法部",
+                canonical_forms=["部里"],
+            )
+        ),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    by_id = {term["id"]: term for term in merged["terms"]}
+    assert by_id["Ministry"]["canonical_forms"] == ["部里"]
+    assert result == {"added": 0, "updated": 1, "conflicts": []}
+
+
+def test_merge_glossary_back_merges_forbidden_source_scope(tmp_path: Path) -> None:
+    root = _series_with_global(tmp_path, [])
+    _write(
+        root / "glossary.json",
+        _glossary(_term("Great Hall", "礼堂", forbidden_targets=["大厅"])),
+    )
+    book = book_state.resolve_book(root, 1)
+    _write(
+        book / "work_temp" / "glossary.json",
+        _glossary(
+            _term(
+                "Great Hall",
+                "礼堂",
+                forbidden_targets=["大厅"],
+                forbidden_source_scoped=True,
+            )
+        ),
+    )
+    result = book_state.merge_glossary_back(root, 1)
+    merged = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    by_id = {term["id"]: term for term in merged["terms"]}
+    assert by_id["Great Hall"]["forbidden_source_scoped"] is True
+    assert result == {"added": 0, "updated": 1, "conflicts": []}

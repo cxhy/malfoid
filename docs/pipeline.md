@@ -284,7 +284,32 @@ injects the same relevant terms per batch. Review and fix load the same glossary
 unambiguous English→Chinese rows from the book and series story bibles; the
 glossary always wins on conflicts. `sync_glossary.py` refreshes a book copy, and
 ingest/prescan also synchronize it. Glossary entries may carry
-`forbidden_targets`, which the delivery verifier scans deterministically.
+`forbidden_targets`, which the delivery verifier scans deterministically, and
+`canonical_forms` for accepted abbreviations or alternate target components.
+A forbidden variant that is a substring of a canonical form is ignored only when
+the target actually contains that canonical form, so `德拉科` does not flag
+`德拉科妮娅` and `索命咒` does not flag `阿瓦达索命咒`, while a bare `德拉科`
+still fails.
+A `forbidden_source_scoped` entry only checks/replaces its forbidden variants in
+segments whose source actually contains the term; common-word variants such as
+`大厅` use this to avoid flagging unrelated prose.
+`align_glossary.py` builds a canonical index from source forms, aliases and target
+components, audits source proper nouns that the glossary does not cover, and
+reports forbidden variants or canonical misses without model calls. A series
+glossary may carry a `coverage_ignore` list for common words or title fragments
+that look like proper nouns; ignored candidates do not enter the coverage gate.
+Series-book delivery enables the coverage gate; legacy flat works keep it off by
+default.
+
+Before translation, `translate_book_v2.py` runs the same coverage audit. For a
+series book with missing candidates it calls `glossary_align_ai.py`: a low-effort
+model classifies each candidate as an alias of an existing term, a new series
+term, a deliberate coverage exception, or unresolved. The model only proposes
+structured decisions; deterministic validation rejects invalid targets, unknown
+terms, duplicate or unresolved candidates. Valid decisions are written to the
+series master and synced to every book; the global table is never modified. If
+coverage remains non-zero, translation refuses to start. Legacy flat works keep
+the warning-only behavior.
 
 `review_preview.py` plans review blocks over the whole preview, maps global review
 indices back to chapter/local positions, records alignment and false-positive
@@ -300,13 +325,14 @@ and single HTML are always kept. When the Markdown exceeds
 chapter-boundary parts as `translation/<title> - Part N.md`; parts never split
 inside a chapter, and an oversized chapter raises an error. Use `--no-split-md`
 to disable splitting. Before writing, delivery runs `verify_book.py`: missing
-targets, forbidden names, English residue and glossary variants are errors that
-block delivery; heading-format issues are warnings. `--skip-verify` is only for
-debugging.
+targets, forbidden names, English residue, glossary variants and (for series
+books) uncovered source proper nouns are errors that block delivery; canonical
+target misses and heading-format issues are warnings. `--allow-coverage-gaps`
+is only for triage, and `--skip-verify` is only for debugging.
 
 The v2 review call injects the active profile's proofread and book-review rules
 (including the female-Draco contract) into every block prompt, so AU changes are
-not "corrected" back to canon. Review covers sentence-level fidelity (omission, addition, mistranslation, semantic reversal, term and spell accuracy) as well as cross-chapter consistency; v2 has no separate per-chunk proofread stage. Evidence verification also receives the canonical glossary, and a `terminology` candidate whose target or candidate text exactly hits a glossary `forbidden_targets` variant is confirmed deterministically without a model call. It uses JSON mode and a tolerant parser that
+not "corrected" back to canon. Review covers sentence-level fidelity (omission, addition, mistranslation, semantic reversal, term and spell accuracy) as well as cross-chapter consistency; v2 has no separate per-chunk proofread stage. Evidence verification also receives the canonical glossary, and a candidate whose anchor target exactly hits a glossary `forbidden_targets` variant is confirmed deterministically without a model call; older reports without `category` still take this path. It uses JSON mode and a tolerant parser that
 accepts only boundary-only repairs (fence, missing outer delimiter); structural
 JSON repairs are rejected. A rejected block bisects recursively down to single segments, then
 retries each segment a bounded number of times. Every block writes a recovery

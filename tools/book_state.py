@@ -269,7 +269,10 @@ def _merge_additive_fields(target: dict, term: dict) -> bool:
         if term.get(field) and not target.get(field):
             target[field] = term[field]
             changed = True
-    for field in ("forbidden_targets", "evidence_refs"):
+    if term.get("forbidden_source_scoped") is True and not target.get("forbidden_source_scoped"):
+        target["forbidden_source_scoped"] = True
+        changed = True
+    for field in ("forbidden_targets", "evidence_refs", "canonical_forms"):
         existing = list(target.get(field) or [])
         for value in term.get(field) or []:
             if value not in existing:
@@ -282,11 +285,13 @@ def _merge_additive_fields(target: dict, term: dict) -> bool:
 
 def _has_extra_fields(term: dict, base: dict) -> bool:
     """True when a book term adds fields beyond the canonical global term."""
-    for field in ("aliases", "forbidden_targets", "evidence_refs"):
+    for field in ("aliases", "forbidden_targets", "evidence_refs", "canonical_forms"):
         base_values = {str(value) for value in base.get(field) or []}
         for value in term.get(field) or []:
             if str(value) not in base_values:
                 return True
+    if term.get("forbidden_source_scoped") is True and not base.get("forbidden_source_scoped"):
+        return True
     base_notes = str(base.get("notes") or "")
     term_notes = str(term.get("notes") or "")
     return bool(term_notes and term_notes != base_notes)

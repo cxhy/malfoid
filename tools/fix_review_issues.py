@@ -27,6 +27,7 @@ from typing import Any
 import book_state
 import segment_state
 from batch_translate import relevant_glossary_terms
+import align_glossary
 from model_client import call_client
 from profile_rules import section
 
@@ -98,8 +99,12 @@ def _glossary_variants(terms: list[Any] | None) -> list[str]:
     """Return forbidden glossary variants that are not substrings of canonical targets."""
     variants: list[str] = []
     seen: set[str] = set()
+    index = align_glossary.build_alignment_terms(terms)
+    protected = align_glossary.protected_canonical_forms(index)
     for term in terms or []:
         if not isinstance(term, dict):
+            continue
+        if term.get("forbidden_source_scoped"):
             continue
         canonical = str(term.get("target") or "")
         for variant in term.get("forbidden_targets") or []:
@@ -107,6 +112,8 @@ def _glossary_variants(terms: list[Any] | None) -> list[str]:
                 continue
             value = variant.strip()
             if canonical and value in canonical:
+                continue
+            if any(value in form for form in protected):
                 continue
             key = value.casefold()
             if key in seen:
@@ -327,7 +334,9 @@ def parse_fix_output(raw: Any) -> str:
     return target.strip()
 
 
-def validate_fix(target: FixTarget, fixed: str) -> None:
+def validate_fix(
+    target: FixTarget, fixed: str, glossary_terms: list[Any] | None = None
+) -> None:
     if FORBIDDEN.search(fixed):
         raise ValueError("fixed target contains a forbidden name")
     if ENGLISH.search(fixed):
@@ -337,6 +346,32 @@ def validate_fix(target: FixTarget, fixed: str) -> None:
         ratio = len(fixed) / source_len
         if ratio < 0.1 or ratio > 1.2:
             raise ValueError(f"fixed target length ratio is unsafe: {ratio:.2f}")
+    if not glossary_terms:
+        return
+    terms = align_glossary.build_alignment_terms(glossary_terms)
+    protected = align_glossary.protected_canonical_forms(terms)
+    for term in terms:
+        if term.forbidden_source_scoped and not align_glossary._term_matches(term, target.source):
+            continue
+        variant = align_glossary._first_variant(term, fixed, protected)
+        if variant:
+            raise ValueError(
+                f"fixed target contains glossary forbidden variant {variant!r} "
+                f"for term {term.term_id!r}"
+            )
+    # When the current target carries a confirmed forbidden variant, the fix must
+    # actually move to the canonical form or one of its accepted components.
+    for term in terms:
+        if not term.canonical_forms:
+            continue
+        if not align_glossary._term_matches(term, target.source):
+            continue
+        if not align_glossary._first_variant(term, target.current, protected):
+            continue
+        if not any(align_glossary._contains(fixed, form) for form in term.canonical_forms):
+            raise ValueError(
+                f"fixed target does not contain canonical target for {term.term_id!r}"
+            )
 
 
 def _issue_hash(target: FixTarget) -> str:
@@ -498,7 +533,7 @@ def apply_fixes(
                 raw = call_client(client, build_fix_prompt(target, rules, glossary_terms))
                 try:
                     candidate = parse_fix_output(raw)
-                    validate_fix(target, candidate)
+                    validate_fix(target, candidate, glossary_terms)
                 except Exception as exc:
                     error = str(exc) or exc.__class__.__name__
                     continue
@@ -587,6 +622,9 @@ def apply_fixes(
             for path in (queue_json, queue_md):
                 if path.is_file():
                     path.unlink()
+    post_alignment = None
+    if not dry_run:
+        post_alignment = align_glossary.scan_alignment(book_dir, glossary_terms)
     return {
         "applied": applied,
         "failed": failed,
@@ -597,6 +635,7 @@ def apply_fixes(
         "records": records,
         "manual_queue_json": str(queue_json) if queue_json is not None else None,
         "manual_queue_md": str(queue_md) if queue_md is not None else None,
+        "post_alignment_errors": post_alignment["errors"] if post_alignment else [],
     }
 
 

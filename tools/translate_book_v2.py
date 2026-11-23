@@ -20,8 +20,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+import align_glossary
 import batch_translate
 import book_state
+import glossary_align_ai
 import polish_batch
 import segment_state
 from profile_rules import section, section_with_skill
@@ -29,6 +31,10 @@ from profile_rules import section, section_with_skill
 
 class TimeBudgetExceeded(RuntimeError):
     """Raised between saved batches when a translate run reaches its time budget."""
+
+
+class GlossaryCoverageError(RuntimeError):
+    """Raised when a series book still has uncovered proper nouns."""
 
 
 def load_glossary_terms(book_dir: Path) -> list[dict[str, Any]]:
@@ -59,6 +65,10 @@ def _pending(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _is_series_book(book_dir: Path) -> bool:
+    return book_state.is_series_root(book_dir.parent.parent)
+
+
 def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -84,6 +94,8 @@ def translate_book(
     chapters: list[int | float] | None = None,
     progress_path: Path | None = None,
     max_seconds: float | None = None,
+    alignment_client: Any | None = None,
+    auto_align_glossary: bool = True,
 ) -> dict[str, Any]:
     """Translate pending segments and optionally polish them; return a summary.
 
@@ -92,6 +104,19 @@ def translate_book(
     rerunning the same command continues from the saved state.
     """
     terms = load_glossary_terms(book_dir)
+    coverage = align_glossary.coverage_report(book_dir, terms, min_count=3)
+    alignment: dict[str, Any] | None = None
+    if coverage["missing"] and auto_align_glossary and _is_series_book(book_dir):
+        alignment = glossary_align_ai.align_book(
+            book_dir, alignment_client or client, min_count=3
+        )
+        terms = load_glossary_terms(book_dir)
+        coverage = align_glossary.coverage_report(book_dir, terms, min_count=3)
+        if coverage["missing"]:
+            names = ", ".join(item["candidate"] for item in coverage["missing"][:20])
+            raise GlossaryCoverageError(
+                "series book still has uncovered proper nouns after AI alignment: " + names
+            )
     translation_rules = section("translation", work_dir=book_dir)
     polish_rules = section_with_skill("polish", mode="轻改", work_dir=book_dir)
     translated = polished = 0
@@ -184,6 +209,8 @@ def translate_book(
         "polish": polish,
         "stopped": stopped,
         "elapsed": round(time.time() - started, 1),
+        "glossary_coverage_missing": coverage["missing"],
+        "glossary_alignment": alignment,
     }
 
 
@@ -204,6 +231,18 @@ def main() -> None:
         help="stop gracefully between batches after N seconds (0 = no limit)",
     )
     ap.add_argument("--no-polish", action="store_true")
+    ap.add_argument(
+        "--skip-glossary-alignment",
+        action="store_true",
+        help="skip AI glossary alignment (debug only; coverage gaps still warn)",
+    )
+    ap.add_argument(
+        "--glossary-alignment-effort", default="low", help="effort for AI glossary alignment"
+    )
+    ap.add_argument(
+        "--glossary-alignment-max-tokens", type=int, default=8192,
+        help="max tokens for AI glossary alignment",
+    )
     ap.add_argument(
         "--chapters",
         default=None,
@@ -228,6 +267,15 @@ def main() -> None:
         args.max_tokens,
         usage_log=args.book_dir / "work_temp" / "usage.jsonl",
     )
+    alignment_client = None
+    if not args.skip_glossary_alignment:
+        alignment_client = make_client(
+            args.model,
+            args.glossary_alignment_effort,
+            args.glossary_alignment_max_tokens,
+            usage_log=args.book_dir / "work_temp" / "glossary_alignment_usage.jsonl",
+            system=glossary_align_ai.SYSTEM,
+        )
     summary = translate_book(
         args.book_dir,
         client,
@@ -235,8 +283,16 @@ def main() -> None:
         polish=not args.no_polish,
         chapters=chapters,
         max_seconds=args.max_seconds or None,
+        alignment_client=alignment_client,
+        auto_align_glossary=not args.skip_glossary_alignment,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if summary.get("glossary_coverage_missing"):
+        print(
+            "WARNING: source proper nouns not covered by the glossary: "
+            + ", ".join(item["candidate"] for item in summary["glossary_coverage_missing"][:20])
+            + "\nRun tools/align_glossary.py --strict-coverage --min-count 3 for details."
+        )
     if summary["failures"]:
         raise SystemExit(1)
 

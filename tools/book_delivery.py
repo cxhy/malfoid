@@ -211,6 +211,8 @@ def write_delivery(
     verify: bool = True,
     merge_glossary: bool = True,
     strict_glossary: bool = True,
+    strict_coverage: bool | None = None,
+    min_coverage_count: int = 3,
 ) -> DeliveryResult:
     """Render Markdown and template HTML under ``translation/<title>``.
 
@@ -227,7 +229,13 @@ def write_delivery(
         if conflicts and strict_glossary:
             raise GlossaryConflictError(glossary_merge)
     if verify:
-        report = verify_book.verify_book(book)
+        if strict_coverage is None:
+            strict_coverage = book_state.is_series_root(book.parent.parent)
+        report = verify_book.verify_book(
+            book,
+            strict_coverage=strict_coverage,
+            min_coverage_count=min_coverage_count,
+        )
         if not report["ok"]:
             raise verify_book.DeliveryVerificationError(report)
     meta = _read_meta(book)
@@ -278,6 +286,17 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="deliver even when book-local terms conflict with the series/global glossary",
     )
+    parser.add_argument(
+        "--allow-coverage-gaps",
+        action="store_true",
+        help="do not block delivery on uncovered source proper nouns",
+    )
+    parser.add_argument(
+        "--coverage-min-count",
+        type=int,
+        default=3,
+        help="minimum source occurrences for a coverage error (default: 3)",
+    )
     args = parser.parse_args(argv)
     split_chars = None if args.no_split_md else args.split_md_chars
     try:
@@ -289,6 +308,8 @@ def main(argv: list[str] | None = None) -> None:
             verify=not args.skip_verify,
             merge_glossary=not args.skip_glossary_merge,
             strict_glossary=not args.allow_glossary_conflicts,
+            strict_coverage=False if args.allow_coverage_gaps else None,
+            min_coverage_count=args.coverage_min_count,
         )
     except GlossaryConflictError as exc:
         print(json.dumps(exc.merge, ensure_ascii=False, indent=2))

@@ -33,12 +33,18 @@ def load_config() -> tuple[str, str]:
 
 
 def call(
-    base_url: str, api_key: str, model: str, prompt: str, effort: str, max_tokens: int
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    effort: str,
+    max_tokens: int,
+    system: str = SYSTEM,
 ) -> tuple[str, dict]:
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.6,
@@ -64,6 +70,7 @@ def make_client(
     effort: str,
     max_tokens: int,
     usage_log: Path | None = None,
+    system: str = SYSTEM,
 ):
     base_url, api_key = load_config()
     lock = threading.Lock()
@@ -87,7 +94,7 @@ def make_client(
 
     def client(prompt: str) -> str:
         started = time.time()
-        text, usage = call(base_url, api_key, model, prompt, effort, max_tokens)
+        text, usage = call(base_url, api_key, model, prompt, effort, max_tokens, system)
         record(usage, prompt, time.time() - started)
         return text
 

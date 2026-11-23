@@ -818,3 +818,132 @@ def test_collect_candidates_preserves_category_and_severity() -> None:
     candidates = review_evidence.collect_candidates([review], blocks)
     assert candidates[0]["category"] == "terminology"
     assert candidates[0]["severity"] == "low"
+
+
+def test_deterministic_glossary_hit_does_not_require_category() -> None:
+    chapters = [
+        _chapter(
+            1,
+            [
+                _segment(
+                    0,
+                    "Don't you dare, levicor....",
+                    "“你敢！利维科……”",
+                    chapter=1,
+                )
+            ],
+        )
+    ]
+    candidate = _candidate(
+        segment_index=0,
+        message="术语漂移：利维科与术语表不一致。",
+        proposal="改为“倒挂金…”。",
+    )
+    glossary = [
+        {
+            "id": "Levicorpus",
+            "source": "Levicorpus",
+            "target": "倒挂金钟",
+            "aliases": ["levicor"],
+            "forbidden_targets": ["利维科"],
+        }
+    ]
+    client = SequenceClient([])
+    result = review_evidence.verify_candidates(
+        client, [candidate], chapters, glossary_terms=glossary
+    )
+    assert result[0]["status"] == "confirmed"
+    assert result[0]["deterministic"] is True
+    assert client.calls == []
+
+
+def test_deterministic_glossary_hit_respects_source_scope() -> None:
+    chapters = [
+        _chapter(
+            1,
+            [
+                _segment(
+                    0,
+                    "The goblet shone brightly in the hall.",
+                    "火焰杯在大厅里明亮地闪耀。",
+                    chapter=1,
+                )
+            ],
+        )
+    ]
+    candidate = _candidate(
+        segment_index=0,
+        message="代词指代不清。",
+        proposal="改为礼堂里。",
+    )
+    glossary = [
+        {
+            "id": "Great Hall",
+            "source": "Great Hall",
+            "target": "礼堂",
+            "forbidden_targets": ["大厅"],
+            "forbidden_source_scoped": True,
+        }
+    ]
+    result = review_evidence._deterministic_terminology_result(
+        candidate, chapters, glossary
+    )
+    assert result is None
+
+
+def test_deterministic_glossary_hit_skips_variant_inside_another_canonical() -> None:
+    chapters = [
+        _chapter(
+            1,
+            [_segment(0, "The Killing Curse hit him.", "阿瓦达索命咒击中了他。", chapter=1)],
+        )
+    ]
+    candidate = _candidate(
+        segment_index=0,
+        message="术语漂移：索命咒。",
+        proposal="核对术语。",
+    )
+    glossary = [
+        {
+            "id": "Avada Kedavra",
+            "source": "Avada Kedavra",
+            "target": "阿瓦达索命",
+            "aliases": ["Killing Curse"],
+            "forbidden_targets": ["索命咒"],
+        },
+        {
+            "id": "Killing Curse",
+            "source": "Killing Curse",
+            "target": "阿瓦达索命咒",
+        },
+    ]
+    result = review_evidence._deterministic_terminology_result(
+        candidate, chapters, glossary
+    )
+    assert result is None
+
+
+def test_deterministic_glossary_hit_requires_candidate_term_relevance() -> None:
+    chapters = [
+        _chapter(
+            1,
+            [_segment(0, "She waited.", "她在医疗翼等待着。", chapter=1)],
+        )
+    ]
+    candidate = _candidate(
+        segment_index=0,
+        message="代词指代不清。",
+        proposal="改为她。",
+    )
+    glossary = [
+        {
+            "id": "Hospital Wing",
+            "source": "Hospital Wing",
+            "target": "校医院",
+            "forbidden_targets": ["医疗翼"],
+        }
+    ]
+    result = review_evidence._deterministic_terminology_result(
+        candidate, chapters, glossary
+    )
+    assert result is None

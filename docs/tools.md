@@ -14,6 +14,7 @@ virtualenv; most accept `--help`.
 | `ao3_convert.py` | AO3 "Download → HTML" export → `source/work.md` + `meta.json` |
 | `fic_convert.py` | FicHub HTML export (`div#chap_N`) → same layout |
 | `pdf_convert.py` | chapter-numbered PDF → Markdown, paragraphs rebuilt from indentation |
+| `epub_convert.py` | malfoid.lol EPUB (OPF spine + nav titles) → `Ch N:` source bundle; keeps interludes as decimal chapters |
 | `sb_convert.py` | SpaceBattles plain-text scrape (`第 N 章` headers) → per-book Markdown chapters + manifest |
 
 ## Glossary and context (v1; export_glossary remains active)
@@ -82,7 +83,7 @@ the default `hp-fanfic`.
 |---|---|
 | `ingest_book_v2.py` | create a series/book and ingest source files into chapter state; records `covered_chapters` for range markers |
 | `txt_convert.py` | convert chapter-numbered TXT into Markdown + `meta.json` |
-| `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary and the configured polish skill in light-edit mode |
+| `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary and the configured polish skill in light-edit mode; reports uncovered source proper nouns before translating |
 | `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
 | `book_state.py` | series root, book sub-work, and global/series/book glossary resolution |
 | `sync_glossary.py` | merge global + series into book copies; `--merge-back` merges book-local terms into the series master (never the global table) |
@@ -98,11 +99,13 @@ the default `hp-fanfic`.
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
 | `review_book_v2.py` | whole-book review runner (glossary + story-bible terms in blocks, category/severity issues, evidence, reports, `--limit-blocks`) |
-| `fix_review_issues.py` | apply actionable review categories at high/medium severity; deterministic glossary-variant violations bypass the severity gate; skips segments edited after review; `--dry-run` is plan-only; failures go to `work_temp/fix_review/manual_queue.md` |
-| `book_delivery.py` | auto-merge book glossary into the series master and sync the series; render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first |
-| `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, headings |
+| `fix_review_issues.py` | apply actionable review categories at high/medium severity; deterministic glossary-variant violations bypass the severity gate; validates fixes against glossary forbidden variants and canonical targets; skips segments edited after review; `--dry-run` is plan-only; failures go to `work_temp/fix_review/manual_queue.md` |
+| `align_glossary.py` | deterministic glossary coverage and canonical-target alignment: source proper-noun coverage audit with series `coverage_ignore`, forbidden-variant scan, canonical component check, variant discovery, optional source-scoped forbidden replacement, archive restore by index + source_hash |
+| `glossary_align_ai.py` | pre-translation AI glossary alignment: deterministic missing candidates + low-effort model decisions (alias/new/ignore/unresolved), validated before writing series master and syncing books; global glossary untouched |
+| `book_delivery.py` | auto-merge book glossary into the series master and sync the series; render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first with strict coverage for series books |
+| `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, canonical missing warnings, coverage gate (`--strict-coverage`), headings |
 | `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
-| `review_evidence.py` | verify review candidates with glossary context and deterministic terminology confirmation; arbitrate conflicts |
+| `review_evidence.py` | verify review candidates with glossary context and deterministic confirmation when the anchor target hits a forbidden variant; arbitrate conflicts |
 | `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
 
 Migration path: run `preview_pipeline.py` on the legacy work with the chunk ids that

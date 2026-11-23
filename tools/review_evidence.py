@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+
+import align_glossary
 from typing import Any
 
 import segment_state
@@ -181,29 +183,6 @@ def _matched_term(source: str, target: str, terms: list[str]) -> str | None:
     return None
 
 
-def _glossary_variants(terms: list[Any] | None) -> list[tuple[str, str]]:
-    """Return (term id, forbidden variant) pairs from glossary terms."""
-    variants: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for term in terms or []:
-        if not isinstance(term, dict):
-            continue
-        term_id = str(term.get("id") or term.get("source") or "")
-        canonical = str(term.get("target") or "")
-        for variant in term.get("forbidden_targets") or []:
-            if not isinstance(variant, str) or not variant.strip():
-                continue
-            value = variant.strip()
-            if canonical and value in canonical:
-                continue
-            key = value.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            variants.append((term_id, value))
-    return variants
-
-
 def _glossary_text(terms: list[Any] | None) -> str:
     """Format glossary terms for an evidence prompt."""
     lines: list[str] = []
@@ -227,32 +206,58 @@ def _glossary_text(terms: list[Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _candidate_mentions_term(
+    candidate: dict[str, Any], term: align_glossary.AlignmentTerm
+) -> bool:
+    text = " ".join(
+        str(candidate.get(field) or "")
+        for field in ("subject", "message", "proposal")
+    ).casefold()
+    focus = [str(value) for value in candidate.get("focus_terms") or []]
+    needles = [
+        term.term_id,
+        term.target,
+        *term.sources,
+        *term.canonical_forms,
+        *term.forbidden,
+    ]
+    for needle in needles:
+        value = str(needle).strip()
+        if not value:
+            continue
+        if value.casefold() in text:
+            return True
+        if any(value.casefold() == item.casefold() for item in focus):
+            return True
+    return False
+
+
 def _deterministic_terminology_result(
     candidate: dict[str, Any],
     chapters: list[dict[str, Any]],
     glossary_terms: list[Any] | None,
 ) -> dict[str, Any] | None:
-    """Confirm a terminology candidate when it hits a glossary forbidden variant.
+    """Confirm a candidate when its anchor target hits a glossary forbidden variant.
 
     The glossary is project-authoritative for terminology, so an exact forbidden
-    variant hit does not need a model verdict. This only applies to candidates
-    explicitly categorized as ``terminology``; ordinary term suggestions still go
-    through evidence verification.
+    variant hit in the translated target does not need a model verdict. Older
+    review reports may omit ``category``; the target hit is sufficient.
     """
-    if str(candidate.get("category") or "").strip().lower() != "terminology":
+    index = align_glossary.build_alignment_terms(glossary_terms)
+    if not index:
         return None
-    variants = _glossary_variants(glossary_terms)
-    if not variants:
-        return None
+    protected = align_glossary.protected_canonical_forms(index)
     chapter, _, _, segment = _locate_anchor(candidate, chapters)
-    text = "\n".join(
-        [
-            str(segment.get("target") or ""),
-            str(candidate.get("message") or ""),
-            str(candidate.get("proposal") or ""),
-        ]
-    )
-    hit = next(((term_id, variant) for term_id, variant in variants if variant in text), None)
+    source = str(segment.get("source") or "")
+    target = str(segment.get("target") or "")
+    hit = None
+    for term in index:
+        if term.forbidden_source_scoped and not align_glossary._term_matches(term, source):
+            continue
+        variant = align_glossary._first_variant(term, target, protected)
+        if variant and _candidate_mentions_term(candidate, term):
+            hit = (term.term_id, variant)
+            break
     if hit is None:
         return None
     term_id, variant = hit
@@ -265,7 +270,7 @@ def _deterministic_terminology_result(
         "rounds": 0,
         "reason": (
             f"glossary variant {variant!r} for term {term_id!r} appears in the "
-            "target or candidate text; deterministic confirmation"
+            "translated target; deterministic confirmation"
         ),
         "requested_terms": [],
         "evidence": [

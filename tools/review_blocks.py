@@ -207,10 +207,14 @@ def _parse_json(text: Any) -> Any:
     return value
 
 
-_NO_ISSUE_PROPOSAL = re.compile(r"^\s*(no change needed|no change|none|n/?a)\.?\s*$", re.I)
+_NO_ISSUE_PROPOSAL = re.compile(
+    r"^\s*(?:no change needed|no change|none|n/?a|无需修改|不需要修改|无需改动|无需调整|保持不变|正确|可接受)"
+    r"(?:[，,。.;；\s].*)?$",
+    re.I,
+)
 _NO_ISSUE_MESSAGE = re.compile(
     r"(?:^|[.!?。]\s*)(?:no issue|no defect|no problem)[.!?。]*\s*$"
-    r"|(?:无问题|无需修改|不需要修改|无需改动|无需调整)[。.!?]*\s*$",
+    r"|(?:无问题|无需修改|不需要修改|无需改动|无需调整|译名正确|术语正确|称呼正确)[。.!?]*\s*$",
     re.I,
 )
 

@@ -286,3 +286,53 @@ def test_write_delivery_can_allow_glossary_conflicts(tmp_path: Path) -> None:
 
     assert result.markdown.is_file()
     assert result.glossary_merge["merge"]["conflicts"]
+
+
+def test_write_delivery_blocks_series_books_with_uncovered_names(tmp_path: Path) -> None:
+    root = tmp_path / "workspace" / "series"
+    book_state.create_series(
+        root,
+        series_id="coverage-test",
+        title="Coverage Test",
+        author="Tester",
+        books=[{"number": 1, "title": "Book 1"}],
+    )
+    book = book_state.resolve_book(root, 1)
+    meta = {"title": "Book One", "author": "Test Author", "book_number": 1}
+    (book / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    chapter = {
+        "chapter": 1,
+        "title": "Chapter One",
+        "heading_level": 1,
+        "segments": [
+            _segment(0, "Chapter One", "第一章", kind="heading"),
+            _segment(1, "Alyza waited.", "阿莉莎等待着。"),
+            _segment(2, "Alyza smiled.", "阿莉莎笑了。"),
+            _segment(3, "Alyza left.", "阿莉莎离开了。"),
+        ],
+    }
+    segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
+    with pytest.raises(verify_book.DeliveryVerificationError) as exc:
+        book_delivery.write_delivery(book)
+    assert any(item["kind"] == "glossary_coverage" for item in exc.value.report["errors"])
+
+
+def test_write_delivery_does_not_apply_series_coverage_gate_to_legacy_work(tmp_path: Path) -> None:
+    book = tmp_path / "book"
+    meta = {"title": "Book One", "author": "Test Author"}
+    (book / "meta.json").parent.mkdir(parents=True, exist_ok=True)
+    (book / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    chapter = {
+        "chapter": 1,
+        "title": "Chapter One",
+        "heading_level": 1,
+        "segments": [
+            _segment(0, "Chapter One", "第一章", kind="heading"),
+            _segment(1, "Alyza waited.", "阿莉莎等待着。"),
+            _segment(2, "Alyza smiled.", "阿莉莎笑了。"),
+            _segment(3, "Alyza left.", "阿莉莎离开了。"),
+        ],
+    }
+    segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
+    result = book_delivery.write_delivery(book)
+    assert result.markdown.is_file()

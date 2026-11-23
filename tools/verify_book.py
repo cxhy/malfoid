@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import align_glossary
 import book_state
 import profile_rules
 import segment_state
@@ -55,28 +56,28 @@ def _segment_text(chapters: list[dict[str, Any]]) -> str:
     )
 
 
-def _glossary_variants(book_dir: Path) -> list[tuple[str, str]]:
-    """Return (term id, forbidden target) pairs from the merged glossary."""
-    variants: list[tuple[str, str]] = []
-    for term in book_state.load_glossary_terms(book_dir):
-        term_id = str(term.get("id") or term.get("source") or "")
-        canonical = str(term.get("target") or "")
-        for variant in term.get("forbidden_targets") or []:
-            if not isinstance(variant, str) or not variant.strip():
-                continue
-            if canonical and variant in canonical:
-                continue
-            variants.append((term_id, variant))
-    return variants
+def verify_book(
+    book_dir: Path,
+    *,
+    strict_coverage: bool = False,
+    min_coverage_count: int = 2,
+) -> dict[str, Any]:
+    """Run deterministic checks and return a machine-readable report.
 
-
-def verify_book(book_dir: Path) -> dict[str, Any]:
-    """Run deterministic checks and return a machine-readable report."""
+    ``strict_coverage`` turns uncovered source proper nouns into errors. The
+    default is false so legacy works and test fixtures without a glossary still
+    pass; delivery enables it for series books.
+    """
     book = Path(book_dir)
     chapters = _chapters(book)
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     blob = _segment_text(chapters)
+    glossary = book_state.load_glossary_terms(book)
+    alignment = align_glossary.scan_alignment(book, glossary, chapters)
+    coverage = align_glossary.coverage_report(
+        book, glossary, chapters, min_count=min_coverage_count
+    )
 
     missing: list[dict[str, Any]] = []
     heading_count = 0
@@ -145,28 +146,32 @@ def verify_book(book_dir: Path) -> dict[str, Any]:
     if english:
         errors.append({"kind": "english_residue", "words": english[:20]})
 
-    for term_id, variant in _glossary_variants(book):
-        count = blob.count(variant)
-        if count:
-            errors.append(
-                {
-                    "kind": "glossary_variant",
-                    "term": term_id,
-                    "variant": variant,
-                    "count": count,
-                }
-            )
+    errors.extend(alignment["errors"])
+    warnings.extend(alignment["warnings"])
+    if strict_coverage:
+        errors.extend(
+            {"kind": "glossary_coverage", **item} for item in coverage["missing"]
+        )
 
     return {
         "book_dir": str(book),
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
+        "coverage": coverage,
+        "alignment": {
+            "errors": alignment["errors"],
+            "warnings": alignment["warnings"],
+            "counts": alignment["counts"],
+        },
         "counts": {
             "chapters": len(chapters),
             "headings": heading_count,
             "missing": len(missing),
             "english_words": len(english),
+            "variant_errors": len(alignment["errors"]),
+            "canonical_missing": len(alignment["warnings"]),
+            "coverage_missing": len(coverage["missing"]),
         },
     }
 
@@ -175,8 +180,23 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("book_dir", type=Path)
     parser.add_argument("--json", action="store_true", help="print the full report")
+    parser.add_argument(
+        "--strict-coverage",
+        action="store_true",
+        help="treat uncovered source proper nouns as errors",
+    )
+    parser.add_argument(
+        "--coverage-min-count",
+        type=int,
+        default=3,
+        help="minimum source occurrences for a coverage error (default: 3)",
+    )
     args = parser.parse_args(argv)
-    report = verify_book(args.book_dir)
+    report = verify_book(
+        args.book_dir,
+        strict_coverage=args.strict_coverage,
+        min_coverage_count=args.coverage_min_count,
+    )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
