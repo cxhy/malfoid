@@ -151,6 +151,48 @@ def test_ai_alignment_rejects_unresolved_without_writing(tmp_path: Path) -> None
     assert (book.parent.parent / "glossary.json").read_text(encoding="utf-8") == before
 
 
+def test_candidate_context_includes_the_name(tmp_path: Path) -> None:
+    filler = "The corridor was quiet. " * 30
+    book = _book(tmp_path, source=filler + "Zorba waited.")
+    contexts = glossary_align_ai._contexts(book, "Zorba")
+    assert contexts
+    assert "Zorba" in contexts[0]["source"]
+
+
+def test_ai_alignment_retries_omitted_candidates(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+
+    class OmittingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps({"decisions": []})
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "candidate": "Zorba",
+                            "action": "new",
+                            "source": "Zorba",
+                            "target": "佐巴",
+                            "category": "person",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    client = OmittingClient()
+    result = glossary_align_ai.align_book(book, client, min_count=1)
+    assert client.calls == 2
+    assert result["coverage_missing"] == 0
+    terms = book_state.load_glossary_terms(book)
+    assert any(term["id"] == "Zorba" for term in terms)
+
+
 def test_ai_alignment_rejects_english_target(tmp_path: Path) -> None:
     book = _book(tmp_path)
     client = DecisionClient(
@@ -206,3 +248,76 @@ def test_translate_book_blocks_when_alignment_unresolved(tmp_path: Path) -> None
     client = DecisionClient([{"candidate": "Zorba", "action": "unresolved"}])
     with pytest.raises(glossary_align_ai.GlossaryAlignmentError):
         translate_book_v2.translate_book(book, client, polish=False)
+
+
+def test_apply_alias_to_global_only_term(tmp_path: Path) -> None:
+    root = tmp_path / "works" / "series"
+    book_state.create_series(
+        root,
+        series_id="hp",
+        title="Test",
+        author="A",
+        books=[{"number": 1, "title": "Book 1"}],
+    )
+    book = book_state.resolve_book(root, 1)
+    global_dir = tmp_path / "glossary"
+    global_dir.mkdir()
+    (global_dir / "hp.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "terms": [_term("Gregory Goyle", "Gregory Goyle", "格雷戈里·高尔")],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = glossary_align_ai._apply(
+        book,
+        [{"term_id": "Gregory Goyle", "candidate": "Gregory"}],
+        [],
+        [],
+        False,
+    )
+    assert result["applied"] is True
+    master = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    term = next(term for term in master["terms"] if term["id"] == "Gregory Goyle")
+    assert term["target"] == "格雷戈里·高尔"
+    assert "Gregory" in term["aliases"]
+    merged = book_state.load_glossary_terms(book)
+    merged_term = next(term for term in merged if term["id"] == "Gregory Goyle")
+    assert "Gregory" in merged_term["aliases"]
+
+
+def test_apply_alias_to_book_only_term(tmp_path: Path) -> None:
+    root = tmp_path / "series"
+    book_state.create_series(
+        root,
+        series_id="hp",
+        title="Test",
+        author="A",
+        books=[{"number": 1, "title": "Book 1"}],
+    )
+    book = book_state.resolve_book(root, 1)
+    book_glossary = book / "work_temp" / "glossary.json"
+    data = json.loads(book_glossary.read_text(encoding="utf-8"))
+    data.setdefault("terms", []).append(
+        _term("Zorba", "Zorba", "佐巴", aliases=["Zorb"])
+    )
+    book_glossary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    result = glossary_align_ai._apply(
+        book,
+        [{"term_id": "Zorba", "candidate": "Zorba the Greek"}],
+        [],
+        [],
+        False,
+    )
+    assert result["applied"] is True
+    master = json.loads((root / "glossary.json").read_text(encoding="utf-8"))
+    term = next(term for term in master["terms"] if term["id"] == "Zorba")
+    assert term["target"] == "佐巴"
+    assert "Zorba the Greek" in term["aliases"]
+    merged = book_state.load_glossary_terms(book)
+    merged_term = next(term for term in merged if term["id"] == "Zorba")
+    assert "Zorba the Greek" in merged_term["aliases"]

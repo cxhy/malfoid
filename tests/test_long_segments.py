@@ -118,6 +118,8 @@ def test_short_source_keeps_the_existing_segment_shape(tmp_path: Path) -> None:
             "source": "Short one.",
             "source_hash": segment_state.source_hash("Short one."),
             "target": None,
+            "source_start": 0,
+            "source_end": 10,
         }
     ]
 

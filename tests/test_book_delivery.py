@@ -135,6 +135,37 @@ def test_write_delivery_keeps_single_markdown_when_under_limit(tmp_path: Path) -
     assert result.markdown_parts == []
 
 
+def test_write_delivery_per_chapter_mode_writes_one_part_per_chapter(tmp_path: Path) -> None:
+    book = _write_book_with_sized_chapters(tmp_path, [40, 40, 40, 40])
+    result = book_delivery.write_delivery(book, split_chars=100, split_mode="per-chapter")
+    assert len(result.markdown_parts) == 4
+    for index, path in enumerate(result.markdown_parts, start=1):
+        text = path.read_text(encoding="utf-8")
+        assert text.count("# 第") == 1
+        assert text.count("章") == 1
+        assert len(text) <= 100
+
+
+def test_write_delivery_reads_per_chapter_mode_from_meta(tmp_path: Path) -> None:
+    book = _write_book_with_sized_chapters(tmp_path, [40, 40, 40, 40])
+    meta_path = book / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["split_mode"] = "per-chapter"
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    result = book_delivery.write_delivery(book, split_chars=100)
+    assert len(result.markdown_parts) == 4
+
+
+def test_split_markdown_per_chapter_rejects_an_oversized_chapter() -> None:
+    markdown = "# 第一章\n\n" + "字" * 50 + "\n"
+    try:
+        book_delivery.split_markdown_per_chapter(markdown, 20)
+    except ValueError as exc:
+        assert "chapter" in str(exc)
+    else:
+        raise AssertionError("oversized chapter should be rejected")
+
+
 def test_split_markdown_balances_chapter_boundaries() -> None:
     markdown = "\n\n".join(f"# 第{i}章\n\n{'字' * 10}" for i in range(1, 5)) + "\n"
     parts = book_delivery.split_markdown(markdown, 40)

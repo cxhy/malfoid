@@ -1,13 +1,16 @@
 """Source ingestion, segment state and Markdown rendering (pipeline v2).
 
 A source file becomes chapters of segments. Every heading starts a chapter; blank
-lines separate paragraphs; single internal newlines stay inside a paragraph. Chapter
-state lives in one JSON document per chapter; Markdown is rendered from that state.
+lines separate paragraphs; single internal newlines stay inside a paragraph; a
+standalone ``---`` line is a hard scene boundary and becomes a separator segment.
+Chapter state lives in one JSON document per chapter; Markdown is rendered from
+that state.
 
-Text segments larger than the per-segment budget are split at sentence boundaries.
-Each part keeps its own source hash; all parts carry the logical source hash and
-logical index, and continuation parts are marked ``cont`` and rendered back into a
-single paragraph.
+Text segments larger than the per-segment budget are split first at line boundaries
+and then at sentence boundaries, so a chunk never starts or ends mid-dialogue when
+the source has line breaks. Each part keeps its own source hash; all parts carry
+the logical source hash and logical index, and continuation parts are marked
+``cont`` and rendered back into a single paragraph.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +39,7 @@ _CHAPTER_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 _BOOK_LABEL_RE = re.compile(r"^\s*book\s+\d+\s*$", re.IGNORECASE)
+_SCENE_SEPARATOR_RE = re.compile(r"^\s*---\s*$")
 _SENTENCE_END_RE = re.compile(r"""[.!?]+["'”’)\]]*(?=\s|$)""")
 _WORD_BEFORE_RE = re.compile(r"([A-Za-z]+)$")
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc"})
@@ -135,11 +140,23 @@ def _sentence_units(text: str) -> list[str]:
     return units or [text]
 
 
+def _text_units(text: str) -> list[str]:
+    """Split text at line boundaries, then at sentence boundaries within a line.
+
+    Concatenating the units reproduces the input exactly. A single oversized
+    sentence stays whole.
+    """
+    units: list[str] = []
+    for line in text.splitlines(keepends=True):
+        units.extend(_sentence_units(line))
+    return units or [text]
+
+
 def _split_text(text: str, max_segment_tokens: int) -> list[str]:
-    """Pack sentence units greedily; an oversized single sentence stays whole."""
+    """Pack line/sentence units greedily; an oversized single sentence stays whole."""
     parts: list[str] = []
     current = ""
-    for unit in _sentence_units(text):
+    for unit in _text_units(text):
         if current and estimate_tokens(current + unit) > max_segment_tokens:
             parts.append(current)
             current = unit
@@ -153,13 +170,13 @@ def _split_text(text: str, max_segment_tokens: int) -> list[str]:
 def split_long_segment(
     segment: dict, max_segment_tokens: int = DEFAULT_SEGMENT_TOKEN_BUDGET
 ) -> list[dict]:
-    """Split one oversized text segment at sentence boundaries.
+    """Split one oversized text segment at line, then sentence, boundaries.
 
-    Heading segments, segments within the budget and existing continuation parts
-    are returned unchanged. A single sentence longer than the budget has no
-    sentence boundary to split at, so it stays whole. Each part has its own source
-    hash; all parts carry ``logical_source_hash`` and ``logical_index``, and
-    continuation parts are marked ``cont``.
+    Heading and separator segments, segments within the budget and existing
+    continuation parts are returned unchanged. A single sentence longer than the
+    budget has no boundary to split at, so it stays whole. Each part has its own
+    source hash; all parts carry ``logical_source_hash`` and ``logical_index``,
+    and continuation parts are marked ``cont``.
     """
     text = segment.get("source") or ""
     if segment.get("kind") != "text" or segment.get("cont"):
@@ -211,6 +228,25 @@ def split_segments(
     return result
 
 
+def assign_source_offsets(chapter: dict) -> None:
+    """Record each segment's span in the normalized chapter source text.
+
+    Offsets are relative to ``chapter_text(chapter)``, not the original file:
+    logical blocks are joined with ``\n\n`` and continuation parts are adjacent.
+    They let coverage checks and future re-segmentation locate source spans.
+    """
+    offset = 0
+    previous_kind: str | None = None
+    for position, segment in enumerate(chapter.get("segments") or []):
+        text = segment.get("source") or ""
+        if position and not (segment.get("cont") and previous_kind == "text"):
+            offset += 2
+        segment["source_start"] = offset
+        segment["source_end"] = offset + len(text)
+        offset += len(text)
+        previous_kind = segment.get("kind")
+
+
 def _segment(index: int, kind: str, text: str, level: int | None = None) -> dict:
     segment = {
         "index": index,
@@ -222,6 +258,16 @@ def _segment(index: int, kind: str, text: str, level: int | None = None) -> dict
     if level is not None:
         segment["level"] = level
     return segment
+
+
+def _separator_segment(index: int) -> dict:
+    return {
+        "index": index,
+        "kind": "separator",
+        "source": "---",
+        "source_hash": source_hash("---"),
+        "target": "---",
+    }
 
 
 def _new_chapter(title: str, level: int | None, segments: list[dict] | None = None) -> dict:
@@ -255,6 +301,13 @@ def parse_source(
                 current["segments"].append(_segment(len(current["segments"]), "text", body))
             para = []
 
+    def append_separator() -> None:
+        nonlocal current
+        if current is None:
+            start_chapter(fallback_title, None)
+        flush_para()
+        current["segments"].append(_separator_segment(len(current["segments"])))
+
     def start_chapter(title: str, level: int | None, segments: list[dict] | None = None) -> None:
         nonlocal current
         flush_para()
@@ -270,6 +323,9 @@ def parse_source(
             continue
         if current is None:
             start_chapter(fallback_title, None)
+        if _SCENE_SEPARATOR_RE.match(line):
+            append_separator()
+            continue
         if line.strip() == "":
             flush_para()
         else:
@@ -280,6 +336,8 @@ def parse_source(
     if max_segment_tokens is not None:
         for chapter in chapters:
             chapter["segments"] = split_segments(chapter["segments"], max_segment_tokens)
+    for chapter in chapters:
+        assign_source_offsets(chapter)
     return chapters
 
 
@@ -338,6 +396,13 @@ _CHAPTER_TITLE_RE = re.compile(
     r"\s*(?:\(.*\))?\s*$",
     re.IGNORECASE,
 )
+# Some serialized titles carry a work prefix, e.g. "Love at Second Sight Chapter 3".
+_CHAPTER_TITLE_SUFFIX_RE = re.compile(
+    r"\bch(?:apter)?s?\s*(\d+(?:\.\d+)?(?:\s*[-–—+]\s*\d+(?:\.\d+)?)*)"
+    r"\s*(?:\(.*\))?\s*$",
+    re.IGNORECASE,
+)
+_INTERLUDE_TITLE_RE = re.compile(r"(?:interlude|间章|插曲)", re.IGNORECASE)
 _CHINESE_DIGITS = "零一二三四五六七八九"
 
 
@@ -368,7 +433,8 @@ def chinese_number(value: int | float) -> str:
 
 def chapter_marker_numbers(title: str) -> list[int | float]:
     """Return the chapter numbers explicitly named in a serialized marker."""
-    match = _CHAPTER_TITLE_RE.match(str(title or "").strip())
+    text = str(title or "").strip()
+    match = _CHAPTER_TITLE_RE.match(text) or _CHAPTER_TITLE_SUFFIX_RE.search(text)
     if not match:
         return []
     return [chapter_number(value) for value in re.findall(r"\d+(?:\.\d+)?", match.group(1))]
@@ -378,9 +444,13 @@ def display_chapter_heading(chapter: dict) -> str | None:
     """Derive a deterministic heading from recorded or serialized chapter numbers.
 
     Returns ``None`` for custom titles that are not chapter markers, so callers
-    keep the translated heading. Ranges collapse to first–last (``Ch18-19-20``
-    becomes ``第十八至二十章``).
+    keep the translated heading. Interludes keep their own title (``插曲：…``)
+    rather than a decimal chapter number. Ranges collapse to first–last
+    (``Ch18-19-20`` becomes ``第十八至二十章``).
     """
+    title = str(chapter.get("title") or "")
+    if _INTERLUDE_TITLE_RE.search(title):
+        return None
     numbers: list[int | float] = []
     covered = chapter.get("covered_chapters")
     if isinstance(covered, list):
@@ -440,6 +510,42 @@ def verify_round_trip(
     left = [(b["kind"], b["level"], b["text"]) for b in logical_blocks(chapter)]
     right = [(b["kind"], b["level"], b["text"]) for b in logical_blocks(got)]
     return left == right
+
+
+def carry_targets(old_chapter: dict, new_chapter: dict) -> int:
+    """Copy targets for segments whose source text is byte-for-byte unchanged.
+
+    Source hashes are content-addressed, so an author revision only loses the
+    targets of paragraphs that actually changed. Duplicate paragraphs are matched
+    in order and never reused twice.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for segment in old_chapter.get("segments") or []:
+        target = segment.get("target")
+        if not isinstance(target, str) or not target.strip():
+            continue
+        key = segment.get("source_hash")
+        if key:
+            buckets.setdefault(key, []).append(segment)
+
+    carried = 0
+    for segment in new_chapter.get("segments") or []:
+        candidates = buckets.get(segment.get("source_hash"))
+        if not candidates:
+            continue
+        for position, old in enumerate(candidates):
+            if old.get("source") == segment.get("source") and old.get("kind") == segment.get("kind"):
+                segment["target"] = old["target"]
+                candidates.pop(position)
+                carried += 1
+                break
+    return carried
+
+
+def _archive_chapter(book_dir: Path, timestamp: str, path: Path) -> None:
+    archive = book_dir / "archive" / timestamp / CHAPTERS_DIR
+    archive.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, archive / path.name)
 
 
 def _chapter_sort_key(path: Path) -> float:
@@ -531,6 +637,12 @@ def _parse_serialized_source(
                 current["segments"].append(_segment(len(current["segments"]), "text", body))
             para = []
 
+    def append_separator() -> None:
+        if current is None:
+            return
+        flush_para()
+        current["segments"].append(_separator_segment(len(current["segments"])))
+
     def start_chapter(number: int | float, title: str) -> None:
         nonlocal current
         flush_para()
@@ -549,6 +661,9 @@ def _parse_serialized_source(
             continue
         if _WATTPAD_MARKER_RE.match(line):
             flush_para()
+            continue
+        if _SCENE_SEPARATOR_RE.match(line):
+            append_separator()
             continue
         if current is None:
             if line.strip() == "":
@@ -570,6 +685,8 @@ def _parse_serialized_source(
     if max_segment_tokens is not None:
         for chapter in chapters:
             chapter["segments"] = split_segments(chapter["segments"], max_segment_tokens)
+    for chapter in chapters:
+        assign_source_offsets(chapter)
     return chapters
 
 
@@ -613,26 +730,39 @@ def ingest_sources(
 
     chapters_dir = book_dir / "source" / CHAPTERS_DIR
     chapters_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    archived = False
     paths_out: list[Path] = []
     for chapter in chapters:
         path = chapter_path(book_dir, chapter_number(chapter["chapter"]))
+        if path.is_file():
+            old_chapter = load_chapter(path)
+            carry_targets(old_chapter, chapter)
+            if chapter_text(old_chapter) != chapter_text(chapter):
+                _archive_chapter(book_dir, timestamp, path)
+                archived = True
         save_chapter(path, chapter)
         paths_out.append(path)
 
     stale = [path for path in chapters_dir.glob("ch-*.json") if path not in paths_out]
     if stale:
-        archive = (
-            book_dir
-            / "archive"
-            / datetime.now(timezone.utc).isoformat(timespec="seconds")
-            / "chapters"
-        )
+        archive = book_dir / "archive" / timestamp / CHAPTERS_DIR
         archive.mkdir(parents=True, exist_ok=True)
         for path in stale:
             path.replace(archive / path.name)
+        archived = True
 
     source_dir = book_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
+    if archived:
+        archive_root = book_dir / "archive" / timestamp
+        for name in ("meta.json",):
+            old = book_dir / name
+            if old.is_file():
+                shutil.copy2(old, archive_root / name)
+        old_work = source_dir / "work.md"
+        if old_work.is_file():
+            shutil.copy2(old_work, archive_root / "work.md")
     work_md = "\n\n".join(render_markdown(chapter) for chapter in chapters) + "\n"
     (source_dir / "work.md").write_text(work_md, encoding="utf-8")
 

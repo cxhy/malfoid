@@ -38,6 +38,7 @@ class DeliveryResult:
     html: Path
     markdown_parts: list[Path]
     glossary_merge: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
 
 
 def _read_meta(book_dir: Path) -> dict[str, Any]:
@@ -195,11 +196,40 @@ def split_markdown(markdown: str, limit: int) -> list[str]:
     ]
 
 
+def split_markdown_per_chapter(markdown: str, limit: int) -> list[str]:
+    """Write one Part per chapter block, keeping each chapter intact.
+
+    This is a book-specific delivery mode: when the Markdown exceeds ``limit``,
+    every chapter becomes its own Part instead of packing chapters into the
+    fewest balanced Parts. A chapter larger than the limit is still an error.
+    """
+    if limit <= 0:
+        raise ValueError("Markdown part limit must be positive")
+    blocks = _chapter_blocks(markdown)
+    sizes = [len(block) for block in blocks]
+    if sum(sizes) <= limit:
+        return []
+    if any(size > limit for size in sizes):
+        raise ValueError("a chapter block exceeds the Markdown part limit")
+    return [block.strip("\n").rstrip() + "\n" for block in blocks]
+
+
 def part_paths(book_dir: Path, title: str, count: int) -> list[Path]:
     """Return the Markdown part paths for a title."""
     output_dir = Path(book_dir) / "translation"
     name = safe_title(title)
     return [output_dir / f"{name} - Part {index}.md" for index in range(1, count + 1)]
+
+
+SPLIT_MODES = ("balanced", "per-chapter")
+
+
+def _meta_split_mode(book_dir: Path) -> str:
+    """Read a per-book split mode from ``meta.json``; default to balanced."""
+    mode = _read_meta(book_dir).get("split_mode")
+    if isinstance(mode, str) and mode in SPLIT_MODES:
+        return mode
+    return "balanced"
 
 
 def write_delivery(
@@ -208,26 +238,35 @@ def write_delivery(
     title: str | None = None,
     author: str | None = None,
     split_chars: int | None = 80000,
+    split_mode: str | None = None,
     verify: bool = True,
     merge_glossary: bool = True,
     strict_glossary: bool = True,
     strict_coverage: bool | None = None,
     min_coverage_count: int = 3,
+    strict_translation_coverage: bool = False,
 ) -> DeliveryResult:
     """Render Markdown and template HTML under ``translation/<title>``.
 
     The full Markdown and single HTML are always kept. When ``split_chars`` is
-    given and the Markdown exceeds it, balanced chapter-boundary parts are also
-    written as ``<title> - Part N.md``. A single chapter larger than the limit
-    is an error: parts never split inside a chapter.
+    given and the Markdown exceeds it, chapter-boundary parts are written as
+    ``<title> - Part N.md``. ``split_mode`` selects the packing policy:
+    ``balanced`` (the default) packs chapters into the fewest parts, while
+    ``per-chapter`` writes one Part per chapter. A book can override the default
+    with ``"split_mode": "per-chapter"`` in ``meta.json``. A single chapter
+    larger than the limit is an error: parts never split inside a chapter.
     """
     book = Path(book_dir)
+    resolved_mode = split_mode or _meta_split_mode(book)
+    if resolved_mode not in SPLIT_MODES:
+        raise ValueError(f"unknown split mode: {resolved_mode}")
     glossary_merge = None
     if merge_glossary:
         glossary_merge = _merge_glossary(book)
         conflicts = (glossary_merge or {}).get("merge", {}).get("conflicts") or []
         if conflicts and strict_glossary:
             raise GlossaryConflictError(glossary_merge)
+    verification = None
     if verify:
         if strict_coverage is None:
             strict_coverage = book_state.is_series_root(book.parent.parent)
@@ -235,7 +274,9 @@ def write_delivery(
             book,
             strict_coverage=strict_coverage,
             min_coverage_count=min_coverage_count,
+            strict_translation_coverage=strict_translation_coverage,
         )
+        verification = report
         if not report["ok"]:
             raise verify_book.DeliveryVerificationError(report)
     meta = _read_meta(book)
@@ -255,7 +296,10 @@ def write_delivery(
     for stale in output_dir.glob(f"{name} - Part *.md"):
         stale.unlink()
     if split_chars is not None:
-        texts = split_markdown(markdown, split_chars)
+        if resolved_mode == "per-chapter":
+            texts = split_markdown_per_chapter(markdown, split_chars)
+        else:
+            texts = split_markdown(markdown, split_chars)
         parts = part_paths(book, resolved_title, len(texts))
         for path, text in zip(parts, texts):
             path.write_text(text, encoding="utf-8")
@@ -265,6 +309,7 @@ def write_delivery(
         html=html_path,
         markdown_parts=parts,
         glossary_merge=glossary_merge,
+        verification=verification,
     )
 
 
@@ -274,6 +319,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--title")
     parser.add_argument("--author")
     parser.add_argument("--split-md-chars", type=int, default=80000)
+    parser.add_argument(
+        "--split-mode",
+        choices=SPLIT_MODES,
+        default=None,
+        help="Part packing policy; default reads meta.json split_mode or balanced",
+    )
     parser.add_argument("--no-split-md", action="store_true")
     parser.add_argument("--skip-verify", action="store_true")
     parser.add_argument(
@@ -292,6 +343,11 @@ def main(argv: list[str] | None = None) -> None:
         help="do not block delivery on uncovered source proper nouns",
     )
     parser.add_argument(
+        "--strict-translation-coverage",
+        action="store_true",
+        help="fail delivery on short targets, fewer sentences or possible missing scene tails",
+    )
+    parser.add_argument(
         "--coverage-min-count",
         type=int,
         default=3,
@@ -305,11 +361,13 @@ def main(argv: list[str] | None = None) -> None:
             title=args.title,
             author=args.author,
             split_chars=split_chars,
+            split_mode=args.split_mode,
             verify=not args.skip_verify,
             merge_glossary=not args.skip_glossary_merge,
             strict_glossary=not args.allow_glossary_conflicts,
             strict_coverage=False if args.allow_coverage_gaps else None,
             min_coverage_count=args.coverage_min_count,
+            strict_translation_coverage=args.strict_translation_coverage,
         )
     except GlossaryConflictError as exc:
         print(json.dumps(exc.merge, ensure_ascii=False, indent=2))
@@ -326,6 +384,11 @@ def main(argv: list[str] | None = None) -> None:
     print(f"html: {result.html}")
     for path in result.markdown_parts:
         print(f"part: {path}")
+    if result.verification:
+        counts = result.verification.get("counts") or {}
+        warnings = counts.get("translation_coverage_warnings", 0)
+        if warnings:
+            print(f"translation coverage warnings: {warnings}")
 
 
 if __name__ == "__main__":

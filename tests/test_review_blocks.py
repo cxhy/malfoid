@@ -620,3 +620,18 @@ def test_no_issue_rejects_chinese_confirmation_entries() -> None:
     assert not review_blocks._is_no_issue(
         {"message": "原文是 Privet Drive，译文写成女贞路，术语表要求女贞路。", "proposal": "改为女贞路。"}
     )
+
+
+def test_plan_blocks_caps_segments_per_block() -> None:
+    segments = [_segment(i, "x") for i in range(7)]
+    blocks = review_blocks.plan_blocks(segments, 100, measure=len, max_segments=3)
+    assert [[segment["index"] for segment in block] for block in blocks] == [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6],
+    ]
+
+
+def test_plan_blocks_rejects_a_non_positive_max_segments() -> None:
+    with pytest.raises(ValueError, match="max_segments"):
+        review_blocks.plan_blocks([_segment(0, "x")], 10, measure=len, max_segments=0)

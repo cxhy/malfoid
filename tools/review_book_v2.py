@@ -182,6 +182,7 @@ def review_book(
     max_segment_retries: int = review_blocks.DEFAULT_SEGMENT_RETRIES,
     max_calls: int | None = review_blocks.DEFAULT_MAX_CALLS,
     limit_blocks: int | None = None,
+    max_segments: int | None = None,
     measure=None,
     cache_dir: Path | None = None,
     trace_dir: Path | None = None,
@@ -193,7 +194,9 @@ def review_book(
     if not chapters:
         raise ValueError(f"book has no chapter state: {book}")
     segments, global_map = flatten_segments(chapters)
-    blocks = review_blocks.plan_blocks(segments, budget, measure)
+    blocks = review_blocks.plan_blocks(
+        segments, budget, measure, max_segments=max_segments
+    )
     if limit_blocks is not None:
         if limit_blocks < 1:
             raise ValueError("limit_blocks must be positive")
@@ -221,6 +224,7 @@ def review_book(
         trace_dir=trace_dir,
         rules=rules,
         glossary_terms=glossary_terms,
+        max_segments=max_segments,
     )
     if len(reviews) != len(blocks):
         raise RuntimeError("review block planning changed between plan and run")
@@ -333,6 +337,12 @@ def main(argv: list[str] | None = None) -> None:
         type=int,
         help="review only the first N blocks (prompt/effort smoke test)",
     )
+    parser.add_argument(
+        "--max-review-segments",
+        type=int,
+        default=review_blocks.DEFAULT_MAX_SEGMENTS,
+        help="cap segments per review block (default: %(default)s)",
+    )
     parser.add_argument("--cache-dir", type=Path, help="review block cache directory")
     parser.add_argument("--trace-dir", type=Path, help="review recovery trace directory")
     parser.add_argument(
@@ -373,6 +383,7 @@ def main(argv: list[str] | None = None) -> None:
         max_segment_retries=args.max_segment_retries,
         max_calls=args.max_calls,
         limit_blocks=args.limit_blocks,
+        max_segments=args.max_review_segments,
         cache_dir=cache_dir,
         trace_dir=trace_dir,
         report_dir=report_dir,

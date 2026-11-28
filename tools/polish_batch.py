@@ -10,6 +10,7 @@ segment order or paragraph count.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from batch_translate import (
@@ -29,10 +30,68 @@ def _protocol_preamble(count: int) -> list[str]:
         f"Return a JSON object with exactly two keys: complete (true) and targets "
         f"(an array of exactly {count} strings, one polished target per segment, "
         f"in order).",
+        "Polish only each TARGET. The SOURCE is the fidelity reference: do not "
+        "retranslate it, and keep every source fact, qualifier, speaker and tone.",
         "Do not add commentary, explanations, extra items or empty strings.",
-        "Each target must remain one segment: do not merge or split segments.",
+        "Each target must remain one segment: do not merge or split segments, "
+        "keep exactly the same number of blank-line paragraph breaks as the "
+        "original TARGET, do not add or remove --- separators, and do not move "
+        "quotation marks across segment boundaries.",
         "",
     ]
+
+
+def _paragraph_breaks(text: str) -> int:
+    return len(re.findall(r"\n\s*\n", text))
+
+
+def _preserves_paragraph_breaks(original: str, polished: str) -> bool:
+    return _paragraph_breaks(original) == _paragraph_breaks(polished)
+
+
+def _preserves_quote_boundaries(original: str, polished: str) -> bool:
+    if polished.count("“") != polished.count("”"):
+        return False
+    if original.startswith("“") != polished.startswith("“"):
+        return False
+    if original.endswith("”") != polished.endswith("”"):
+        return False
+    return True
+
+
+def _preserves_separators(original: str, polished: str) -> bool:
+    return original.count("---") == polished.count("---")
+
+
+def _preserves_structure(original: str, polished: str) -> bool:
+    return (
+        _preserves_paragraph_breaks(original, polished)
+        and _preserves_quote_boundaries(original, polished)
+        and _preserves_separators(original, polished)
+    )
+
+
+def _normalize_paragraph_shape(original: str, polished: str) -> str:
+    """Collapse invented blank lines when the original target has none.
+
+    A segment that used single newlines is one Markdown paragraph. Models often
+    insert blank lines between those lines; restoring the single-newline shape
+    keeps the delivered paragraph boundaries unchanged.
+    """
+    if _paragraph_breaks(original) == 0:
+        return re.sub(r"\n\s*\n", "\n", polished)
+    return polished
+
+
+def _segment_lines(segment: dict[str, Any]) -> list[str]:
+    target = str(segment.get("target") or "")
+    source = segment.get("source")
+    lines = [f"[{segment.get('index')}]"]
+    if isinstance(source, str) and source.strip():
+        lines.extend(["SOURCE:", source.strip(), "TARGET:", target])
+    else:
+        lines.extend(["TARGET:", target])
+    return lines
 
 
 def _rule_lines(rules: str | None) -> list[str]:
@@ -80,7 +139,7 @@ def build_polish_prompt(
         *_protocol_preamble(len(segments)),
     ]
     for segment in segments:
-        lines.append(f"[{segment.get('index')}] {segment.get('target') or ''}")
+        lines.extend(_segment_lines(segment))
     return "\n".join(lines)
 
 
@@ -96,8 +155,8 @@ def build_single_polish_prompt(
         *_rule_lines(rules),
         *_glossary_lines([segment], glossary_terms),
         *_protocol_preamble(1),
+        *_segment_lines(segment),
     ]
-    lines.append(f"[{segment.get('index')}] {segment.get('target') or ''}")
     return "\n".join(lines)
 
 
@@ -177,6 +236,9 @@ def _fallback(
                 ),
                 1,
             )
+            targets[0] = _normalize_paragraph_shape(segment.get("target") or "", targets[0])
+            if not _preserves_structure(segment.get("target") or "", targets[0]):
+                raise ValueError("polished target changed segment structure")
         except Exception as exc:
             results.append(
                 _result(
@@ -253,7 +315,17 @@ def polish_batch(
                 )
             except ProtocolError:
                 continue
-            for segment, target in zip(batch, targets):
+            pairs = list(zip(batch, targets))
+            normalized = []
+            for segment, target in pairs:
+                target = _normalize_paragraph_shape(segment.get("target") or "", target)
+                normalized.append((segment, target))
+            if any(
+                not _preserves_structure(segment.get("target") or "", target)
+                for segment, target in normalized
+            ):
+                continue
+            for segment, target in normalized:
                 batch_results.append(
                     _result(segment, target=target, error=None, attempts=attempts, stage="batch")
                 )

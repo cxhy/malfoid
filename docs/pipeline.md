@@ -63,6 +63,15 @@ the repository.
 
 All converters write `source/work.md` and `meta.json`.
 
+### 1b. Source segments and hard boundaries
+
+A standalone `---` line is a scene boundary, not text: it becomes a `separator`
+segment with target `---`. Long paragraphs are split first at line boundaries and
+then at sentence boundaries, so a segment does not start or end mid-dialogue when
+the source has line breaks. `verify_book` reports translation-coverage suspects
+(short targets, collapsed sentence density, possible missing scene tails); use
+`--strict-translation-coverage` to make them blocking.
+
 ### 2. Chunk and glossary
 
 ```bash
@@ -276,10 +285,12 @@ Glossary resolution is global → series → book. The global canonical table wi
 on canonical targets unless a series term sets `override_global`; series-only
 terms are added on top. Book-local terms supplement the series master and merge
 back with `sync_glossary.py --merge-back`, which never edits the global table.
-Polish loads the configured skill (`fiction-humanizer-zh`) in `轻改` mode and
+Polish loads the configured skill (`translation-polish-zh`) in `轻改` mode and
 appends the profile's `polish.md` last as a highest-priority override, so skill
 upgrades propagate without project edits while the light-edit boundary stays
-explicit. Translation loads the merged global + series + book glossary; polish
+explicit. The polish prompt carries each segment's source alongside its target,
+so the skill can check fidelity as well as translationese; the JSON contract
+still returns one non-empty target per segment. Translation loads the merged global + series + book glossary; polish
 injects the same relevant terms per batch. Review and fix load the same glossary plus
 unambiguous English→Chinese rows from the book and series story bibles; the
 glossary always wins on conflicts. `sync_glossary.py` refreshes a book copy, and
@@ -321,14 +332,20 @@ Before verification it merges book-local glossary terms into the series master a
 synchronizes every book in the series; conflicts with the series/global glossary
 block delivery unless `--allow-glossary-conflicts` is passed. The full Markdown
 and single HTML are always kept. When the Markdown exceeds
-`--split-md-chars` (default 80,000 characters), delivery also writes balanced
-chapter-boundary parts as `translation/<title> - Part N.md`; parts never split
-inside a chapter, and an oversized chapter raises an error. Use `--no-split-md`
-to disable splitting. Before writing, delivery runs `verify_book.py`: missing
+`--split-md-chars` (default 80,000 characters), delivery also writes
+chapter-boundary parts as `translation/<title> - Part N.md`. The default
+`balanced` mode packs chapters into the fewest parts; a book can set
+`"split_mode": "per-chapter"` in `meta.json` (or pass `--split-mode
+per-chapter`) to write one Part per chapter. Parts never split inside a chapter,
+and an oversized chapter raises an error. Use `--no-split-md` to disable
+splitting. Before writing, delivery runs `verify_book.py`: missing
 targets, forbidden names, English residue, glossary variants and (for series
 books) uncovered source proper nouns are errors that block delivery; canonical
-target misses and heading-format issues are warnings. `--allow-coverage-gaps`
-is only for triage, and `--skip-verify` is only for debugging.
+target misses, heading-format issues and translation-coverage suspects (short
+targets, collapsed sentence density, possible missing scene tails) are warnings.
+`--strict-translation-coverage` upgrades those coverage suspects to errors.
+`--allow-coverage-gaps` is only for triage, and `--skip-verify` is only for
+debugging.
 
 The v2 review call injects the active profile's proofread and book-review rules
 (including the female-Draco contract) into every block prompt, so AU changes are
@@ -341,7 +358,9 @@ results are cached under `work_temp/review_cache/`. Review defaults to effort
 `none` because low reasoning stalls large review blocks on the local model; the
 per-call timeout is `MALFOID_REVIEW_TIMEOUT` (default 900s). The review call
 budget (`--max-calls`, default 128) bounds total calls per block so recursive
-bisection cannot become an exponential ladder.
+bisection cannot become an exponential ladder. `--max-review-segments` (default
+40) also caps segments per block, so each review prompt and its JSON output stay
+bounded even when the token budget would pack more paragraphs together.
 
 ## Model configuration
 

@@ -155,3 +155,54 @@ def test_ingest_records_covered_chapters_and_uses_them_for_headings(tmp_path: Pa
     first = segment_state.load_chapter(segment_state.chapter_path(book, 1))
     assert first["covered_chapters"] == [1, 4]
     assert segment_state.display_chapter_heading(first) == "第一至四章"
+
+
+def test_reingest_reuses_targets_for_unchanged_segments(tmp_path: Path) -> None:
+    root = tmp_path / "series"
+    first_source = tmp_path / "first.txt"
+    first_source.write_text(
+        "Ch 1\n\nOne stays.\n\nOne changes.\n\nCh 2\n\nTwo stays.\n",
+        encoding="utf-8",
+    )
+    ingest_book_v2.ingest_book(
+        root,
+        series_id="hp",
+        title="Test",
+        author="A",
+        book_number=1,
+        sources=[first_source],
+        book_title="Book 1",
+    )
+    book = book_state.resolve_book(root, 1)
+    chapter = segment_state.load_chapter(segment_state.chapter_path(book, 1))
+    chapter["segments"][1]["target"] = "第一段不变。"
+    chapter["segments"][2]["target"] = "第二段会变。"
+    segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
+    chapter2 = segment_state.load_chapter(segment_state.chapter_path(book, 2))
+    chapter2["segments"][1]["target"] = "第二章不变。"
+    segment_state.save_chapter(segment_state.chapter_path(book, 2), chapter2)
+
+    updated_source = tmp_path / "updated.txt"
+    updated_source.write_text(
+        "Ch 1\n\nOne stays.\n\nOne has changed.\n\n"
+        "Ch 2\n\nTwo stays.\n\nCh 3\n\nThree is new.\n",
+        encoding="utf-8",
+    )
+    ingest_book_v2.ingest_book(
+        root,
+        series_id="hp",
+        title="Test",
+        author="A",
+        book_number=1,
+        sources=[updated_source],
+        book_title="Book 1",
+    )
+    chapter = segment_state.load_chapter(segment_state.chapter_path(book, 1))
+    assert chapter["segments"][1]["target"] == "第一段不变。"
+    assert chapter["segments"][2]["target"] is None
+    chapter2 = segment_state.load_chapter(segment_state.chapter_path(book, 2))
+    assert chapter2["segments"][1]["target"] == "第二章不变。"
+    chapter3 = segment_state.load_chapter(segment_state.chapter_path(book, 3))
+    assert chapter3["segments"][1]["source"] == "Three is new."
+    archives = list((book / "archive").glob("*/chapters/ch-01.json"))
+    assert archives, "changed chapter should be archived before overwrite"

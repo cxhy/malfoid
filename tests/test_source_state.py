@@ -275,7 +275,24 @@ def test_display_chapter_heading_parses_ranges_and_decimals() -> None:
     assert segment_state.display_chapter_heading({"title": "Ch18-19-20"}) == "第十八至二十章"
     assert segment_state.display_chapter_heading({"title": "Ch 10-10.5"}) == "第十至十点五章"
     assert segment_state.display_chapter_heading({"title": "Ch 9 (Combination)"}) == "第九章"
+    assert (
+        segment_state.display_chapter_heading({"title": "Love at Second Sight Chapter 3"})
+        == "第三章"
+    )
+    assert (
+        segment_state.display_chapter_heading(
+            {"title": "Some Work Chapter 2", "covered_chapters": [2]}
+        )
+        == "第二章"
+    )
     assert segment_state.display_chapter_heading({"title": "Prologue"}) is None
+    assert (
+        segment_state.display_chapter_heading(
+            {"title": "Ch 20.5: Interlude: The Morgoth in the Details"}
+        )
+        is None
+    )
+    assert segment_state.display_chapter_heading({"title": "插曲：细节中的魔苟斯"}) is None
 
 
 def test_render_book_translated_uses_deterministic_headings(tmp_path: Path) -> None:
@@ -334,3 +351,77 @@ def test_render_book_keeps_translated_heading_for_custom_titles(tmp_path: Path) 
     }
     segment_state.save_chapter(segment_state.chapter_path(book, 1), chapter)
     assert segment_state.render_book(book, translated=True).startswith("# 序章")
+
+
+def test_scene_separator_is_a_hard_boundary(tmp_path: Path) -> None:
+    source = tmp_path / "book.md"
+    source.write_text(
+        "# Chapter 1: Start\n\nBefore.\n---\nAfter.\n",
+        encoding="utf-8",
+    )
+    chapters = segment_state.read_source(source)
+    chapter = chapters[0]
+    assert [s["kind"] for s in chapter["segments"]] == [
+        "heading",
+        "text",
+        "separator",
+        "text",
+    ]
+    separator = chapter["segments"][2]
+    assert separator["source"] == "---"
+    assert separator["target"] == "---"
+    assert all(
+        "---" not in s["source"]
+        for s in chapter["segments"]
+        if s["kind"] == "text"
+    )
+    rendered = segment_state.render_markdown(chapter)
+    assert "Before.\n\n---\n\nAfter." in rendered
+    assert segment_state.verify_round_trip(chapter)
+
+
+def test_long_paragraph_splits_at_line_boundaries(tmp_path: Path) -> None:
+    source = tmp_path / "book.md"
+    lines = [
+        f"Dialogue line {number}: " + "word " * 12 + "."
+        for number in range(24)
+    ]
+    paragraph = "\n".join(lines)
+    source.write_text(f"# Chapter 1: Start\n\n{paragraph}\n", encoding="utf-8")
+    chapters = segment_state.read_source(source, max_segment_tokens=100)
+    parts = [
+        s["source"]
+        for s in chapters[0]["segments"]
+        if s["kind"] == "text"
+    ]
+    assert len(parts) > 1
+    assert "".join(parts) == paragraph
+    for part in parts:
+        assert part.startswith("Dialogue line")
+    for part in parts[:-1]:
+        assert part.endswith("\n")
+
+
+def test_serialized_source_keeps_scene_separator(tmp_path: Path) -> None:
+    source = tmp_path / "book.txt"
+    source.write_text(
+        "=== Book 1: Chapter 5 ===\n\nFirst.\n---\nSecond.\n",
+        encoding="utf-8",
+    )
+    chapters = segment_state.read_source(source)
+    kinds = [s["kind"] for s in chapters[0]["segments"]]
+    assert kinds == ["heading", "text", "separator", "text"]
+    assert chapters[0]["segments"][2]["target"] == "---"
+
+
+def test_source_offsets_match_normalized_chapter_text(tmp_path: Path) -> None:
+    source = tmp_path / "book.md"
+    source.write_text(
+        "# Chapter 1: Start\n\nFirst paragraph.\n\n---\n\nSecond paragraph.\n",
+        encoding="utf-8",
+    )
+    chapters = segment_state.read_source(source)
+    chapter = chapters[0]
+    text = segment_state.chapter_text(chapter)
+    for segment in chapter["segments"]:
+        assert text[segment["source_start"]:segment["source_end"]] == segment["source"]

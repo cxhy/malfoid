@@ -14,8 +14,8 @@ indentation and blank lines, splits on sequential chapter headings ("1. Title",
         source/chapters/ch-NN.md
 
 Usage:
-    .venv/bin/python tools/pdf_convert.py "Green_and_Silver/Book_VI.pdf" \
-        --meta-from Green_and_Silver/Green_and_Silver_Book_VI.html \
+    .venv/bin/python tools/pdf_convert.py "downloads/green-and-silver/source/pdf/Green and Silver Book VI.pdf" \
+        --meta-from downloads/green-and-silver/source/ao3/Green_and_Silver_Book_VI.html \
         --work-id 95404276 --force
 """
 

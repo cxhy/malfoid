@@ -129,3 +129,26 @@ def test_verify_book_allows_the_canonical_foreign_inscription(tmp_path: Path) ->
     report = verify_book.verify_book(book)
     assert report["ok"] is True
     assert report["counts"]["english_words"] == 0
+
+
+def test_verify_book_strict_translation_coverage_turns_warning_into_error(
+    tmp_path: Path,
+) -> None:
+    book = _book(tmp_path)
+    path = segment_state.chapter_path(book, 1)
+    chapter = segment_state.load_chapter(path)
+    source = ("甲" * 150) + "\n---\n" + ("乙" * 100)
+    chapter["segments"][1]["source"] = source
+    chapter["segments"][1]["source_hash"] = segment_state.source_hash(source)
+    chapter["segments"][1]["target"] = "只翻译了前半段。" * 5
+    segment_state.save_chapter(path, chapter)
+    report = verify_book.verify_book(book)
+    assert report["ok"] is True
+    assert any(
+        item["kind"] == "possible_missing_scene_tail" for item in report["warnings"]
+    )
+    strict = verify_book.verify_book(book, strict_translation_coverage=True)
+    assert strict["ok"] is False
+    assert any(
+        item["kind"] == "possible_missing_scene_tail" for item in strict["errors"]
+    )

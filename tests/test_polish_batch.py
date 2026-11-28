@@ -70,6 +70,9 @@ def test_polish_batch_aligned_output_returns_one_target_per_segment() -> None:
     assert [r["original"] for r in results] == ["第一段", "第二段", "第三段"]
     assert [r["error"] for r in results] == [None, None, None]
     assert len(client.prompts) == 1
+    assert "SOURCE:" in client.prompts[0]
+    assert "One." in client.prompts[0]
+    assert "TARGET:" in client.prompts[0]
     assert "第一段" in client.prompts[0]
 
 
@@ -232,3 +235,66 @@ def test_build_polish_prompt_injects_relevant_glossary_terms() -> None:
     )
     assert "倒挂金钟" in prompt
     assert "aliases: levicor" in prompt
+
+
+def test_single_polish_prompt_includes_source_and_target() -> None:
+    segment = _segment(0, "One.", "第一段")
+    prompt = polish_batch.build_single_polish_prompt(segment)
+    assert "SOURCE:" in prompt
+    assert "One." in prompt
+    assert "TARGET:" in prompt
+    assert "第一段" in prompt
+
+
+def test_polish_prompt_omits_empty_source() -> None:
+    segment = _segment(0, "", "第一段")
+    prompt = polish_batch.build_polish_prompt([segment])
+    assert "SOURCE:" not in prompt
+    assert "TARGET:" in prompt
+
+
+def test_polish_prompt_keeps_paragraph_breaks() -> None:
+    segment = _segment(0, "One.", "第一段\n第二段")
+    prompt = polish_batch.build_polish_prompt([segment])
+    assert "blank-line paragraph breaks" in prompt
+
+
+def test_polish_normalizes_invented_blank_lines() -> None:
+    segment = _segment(0, "One.", "甲\n乙")
+    client = SequenceClient([_payload("甲\n\n乙")])
+    results = polish_batch.polish_batch(client, [segment], budget=2000)
+    assert results[0]["target"] == "甲\n乙"
+    assert results[0]["attempts"] == 1
+    assert results[0]["error"] is None
+
+
+def test_polish_rejects_removed_paragraph_break() -> None:
+    segment = _segment(0, "One.", "甲\n\n乙")
+    client = SequenceClient([_payload("甲\n乙"), _payload("甲\n\n乙")])
+    results = polish_batch.polish_batch(client, [segment], budget=2000)
+    assert results[0]["target"] == "甲\n\n乙"
+    assert results[0]["attempts"] == 2
+
+
+def test_polish_rejects_added_separator() -> None:
+    segment = _segment(0, "One.", "甲")
+    client = SequenceClient([_payload("---\n甲"), _payload("甲")])
+    results = polish_batch.polish_batch(client, [segment], budget=2000)
+    assert results[0]["target"] == "甲"
+    assert results[0]["attempts"] == 2
+
+
+def test_polish_rejects_unbalanced_quote() -> None:
+    segment = _segment(0, "One.", "“甲”")
+    client = SequenceClient([_payload("甲”"), _payload("“甲”")])
+    results = polish_batch.polish_batch(client, [segment], budget=2000)
+    assert results[0]["target"] == "“甲”"
+    assert results[0]["attempts"] == 2
+
+
+def test_polish_rejects_moved_boundary_quote() -> None:
+    segment = _segment(0, "One.", "“甲”")
+    client = SequenceClient([_payload("甲"), _payload("“甲”")])
+    results = polish_batch.polish_batch(client, [segment], budget=2000)
+    assert results[0]["target"] == "“甲”"
+    assert results[0]["attempts"] == 2

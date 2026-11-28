@@ -18,7 +18,7 @@ Chapter headings are `# Chapter <n>: <part title>`, so prescan/chunk mapping
 works unchanged.
 
 Usage:
-    .venv/bin/python tools/txt_convert.py "Harry Potter and the Sorcerer's Tsundere/单章"
+    .venv/bin/python tools/txt_convert.py "downloads/hp-tsundere/source/单章"
     .venv/bin/python tools/txt_convert.py "…/单章/001 Book 1: Chapter 5-7.txt" --work-id wattpad-1667660966
 """
 

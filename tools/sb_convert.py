@@ -22,8 +22,9 @@ Output layout (default ``<input parent>/normalized``):
         manifest.json             source file -> book/chapter mapping
 
 Usage:
-    .venv/bin/python tools/sb_convert.py "Worst Enemy/单章"
-    .venv/bin/python tools/sb_convert.py "Worst Enemy/单章" --out "Worst Enemy/normalized" --force
+    .venv/bin/python tools/sb_convert.py "downloads/worst-enemy/source/单章"
+    .venv/bin/python tools/sb_convert.py "downloads/worst-enemy/source/单章" \
+        --out "downloads/worst-enemy/derived/normalized" --force
 """
 
 from __future__ import annotations

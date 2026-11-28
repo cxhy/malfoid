@@ -29,6 +29,7 @@ DEFAULT_WORKERS = 1
 DEFAULT_BISECT_DEPTH = 8
 DEFAULT_SEGMENT_RETRIES = 2
 DEFAULT_MAX_CALLS = 128
+DEFAULT_MAX_SEGMENTS = 40
 TRACE_RAW_CHARS = 12000
 
 
@@ -48,14 +49,19 @@ def plan_blocks(
     segments: list[dict[str, Any]],
     budget: int = DEFAULT_REVIEW_BUDGET,
     measure=None,
+    max_segments: int | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Pack contiguous segments into deterministic blocks within the budget.
 
-    A segment larger than the budget is rejected here; the long-segment splitter
-    keeps individual segments below the translation batch budget.
+    ``max_segments`` also caps the number of segments per block, which bounds
+    each review prompt and its JSON output. A segment larger than the budget is
+    rejected here; the long-segment splitter keeps individual segments below the
+    translation batch budget.
     """
     if budget <= 0:
         raise ValueError("review block budget must be positive")
+    if max_segments is not None and max_segments < 1:
+        raise ValueError("review block max_segments must be positive")
     measure = measure or estimate_tokens
     blocks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -67,7 +73,10 @@ def plan_blocks(
                 f"segment {segment.get('index')} needs {size} units and exceeds "
                 f"the review block budget of {budget}"
             )
-        if current and used + size > budget:
+        if current and (
+            used + size > budget
+            or (max_segments is not None and len(current) >= max_segments)
+        ):
             blocks.append(current)
             current = []
             used = 0
@@ -594,6 +603,7 @@ def run_review(
     rules: str | None = None,
     glossary_terms: list[Any] | None = None,
     limit_blocks: int | None = None,
+    max_segments: int | None = None,
 ) -> list[dict[str, Any]]:
     """Plan and review blocks in parallel, returning results in block order.
 
@@ -604,7 +614,7 @@ def run_review(
     """
     if workers < 1:
         raise ValueError("workers must be at least 1")
-    blocks = plan_blocks(segments, budget, measure)
+    blocks = plan_blocks(segments, budget, measure, max_segments=max_segments)
     if limit_blocks is not None:
         if limit_blocks < 1:
             raise ValueError("limit_blocks must be positive")

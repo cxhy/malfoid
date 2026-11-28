@@ -81,13 +81,13 @@ the default `hp-fanfic`.
 
 | Tool | Purpose |
 |---|---|
-| `ingest_book_v2.py` | create a series/book and ingest source files into chapter state; records `covered_chapters` for range markers |
+| `ingest_book_v2.py` | create a series/book and ingest source files into chapter state; records `covered_chapters` for range markers, keeps standalone `---` as separator segments and records source offsets |
 | `txt_convert.py` | convert chapter-numbered TXT into Markdown + `meta.json` |
 | `translate_book_v2.py` | translate pending segments and polish them end-to-end; saves per batch, `--max-seconds` stops gracefully; uses the merged series + book glossary and the configured polish skill in light-edit mode; reports uncovered source proper nouns before translating |
 | `prescan_book.py` | per-book prescan CLI: parallel digests, style/synopsis/bible |
 | `book_state.py` | series root, book sub-work, and global/series/book glossary resolution |
 | `sync_glossary.py` | merge global + series into book copies; `--merge-back` merges book-local terms into the series master (never the global table) |
-| `segment_state.py` | source parsing, chapter/segment state, Markdown rendering, deterministic chapter headings |
+| `segment_state.py` | source parsing with hard blank-line/scene-separator boundaries, line-aware long-segment splitting, source offsets, chapter/segment state, Markdown rendering, deterministic chapter headings |
 | `token_budget.py` | shared deterministic token estimator |
 | `model_api.py` | local OpenAI-compatible model endpoint |
 | `profile_rules.py` | resolve the active profile and compose stage rules |
@@ -95,6 +95,7 @@ the default `hp-fanfic`.
 | `model_client.py` | callable/object client adapter |
 | `batch_translate.py` | translation batch protocol |
 | `polish_batch.py` | polish batch protocol with relevant glossary injection and skill light-edit rules |
+| `repolish_book_v2.py` | re-polish existing targets against the source with the configured polish skill; backs up chapter state under `archive/repolish-<timestamp>/`, saves per batch, `--chapters` and `--dry-run` select scope |
 | `preview_migration.py` | migrate a legacy chunk preview into chapter/segment state |
 | `preview_pipeline.py` | run preview migration, retranslation and polish end-to-end |
 | `review_preview.py` | validate preview review, record false positives and Book 1 GO/NO-GO |
@@ -102,8 +103,9 @@ the default `hp-fanfic`.
 | `fix_review_issues.py` | apply actionable review categories at high/medium severity; deterministic glossary-variant violations bypass the severity gate; validates fixes against glossary forbidden variants and canonical targets; skips segments edited after review; `--dry-run` is plan-only; failures go to `work_temp/fix_review/manual_queue.md` |
 | `align_glossary.py` | deterministic glossary coverage and canonical-target alignment: source proper-noun coverage audit with series `coverage_ignore`, forbidden-variant scan, canonical component check, variant discovery, optional source-scoped forbidden replacement, archive restore by index + source_hash |
 | `glossary_align_ai.py` | pre-translation AI glossary alignment: deterministic missing candidates + low-effort model decisions (alias/new/ignore/unresolved), validated before writing series master and syncing books; global glossary untouched |
-| `book_delivery.py` | auto-merge book glossary into the series master and sync the series; render full Markdown + HTML with deterministic chapter headings; split Markdown into balanced `Part N` files; runs `verify_book` first with strict coverage for series books |
-| `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, canonical missing warnings, coverage gate (`--strict-coverage`), headings |
+| `book_delivery.py` | auto-merge book glossary into the series master and sync the series; render full Markdown + HTML with deterministic chapter headings; split Markdown into `Part N` files (`balanced` by default, `per-chapter` via meta/`--split-mode`); runs `verify_book` first with strict glossary coverage for series books; `--strict-translation-coverage` makes coverage suspects blocking |
+| `verify_book.py` | deterministic delivery checks: completeness, names, English residue, glossary variants, canonical missing warnings, glossary coverage gate (`--strict-coverage`), translation coverage (`--strict-translation-coverage`), headings |
+| `translation_coverage.py` | deterministic source-to-target coverage report: chapter median length ratio, sentence-density outliers, scene-separator/tail suspects; errors for extreme short targets, warnings for suspects |
 | `review_blocks.py` | plan review blocks, JSON repair, recursive bisection, traces, call budget |
 | `review_evidence.py` | verify review candidates with glossary context and deterministic confirmation when the anchor target hits a forbidden variant; arbitrate conflicts |
 | `review_reports.py` | write review JSON/Markdown reports and PASS/FAIL summaries |
@@ -115,10 +117,11 @@ works; v2 review artifacts live under `translation/review/`.
 
 ## Vendored skills
 
-The pipeline uses three MIT-licensed agent skills under `.pi/skills/`:
+The pipeline uses these MIT-licensed agent skills under `.pi/skills/`:
 
 - `translate-book` — chunking, glossary scripts and merge/build helpers;
-- `fiction-humanizer-zh` — loaded at runtime for v2 polish in `轻改` mode; the profile's `polish.md` is appended last as a highest-priority override;
+- `translation-polish-zh` — loaded at runtime for v2 polish in `轻改` mode; source-grounded translation polish, distilled from `HoraceLuBFA/en-zh-translation-polish`; the profile's `polish.md` is appended last as a highest-priority override;
+- `fiction-humanizer-zh` — community fork by 歸藏 for restrained final-pass de-AI editing of native fiction; user-invoked and not used by the automated polish pipeline;
 - `humanizer-zh` — reference only; not used by the automated pipeline.
 
 See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

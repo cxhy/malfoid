@@ -27,11 +27,11 @@ works/<series-id>-<slug>/          # 一个系列一个根目录
 ## 翻译流程（v2）
 
 0. **接入原文**：AO3 / FicHub / PDF / Wattpad TXT 用转换器生成 `source/work.md` + `meta.json`；TXT/Markdown 也可以直接接入 v2。
-1. **建系列/书 + 接入**：`ingest_book_v2.py` 创建系列根、书子 work，把多个源文件接成连续章号，写 `source/chapters/ch-NN.json`，并设置 `source_complete`；范围标记（如 `Ch 1-4`、`Ch18-19-20`）会记录 `covered_chapters`。
+1. **建系列/书 + 接入**：`ingest_book_v2.py` 创建系列根、书子 work，把多个源文件接成连续章号，写 `source/chapters/ch-NN.json`，并设置 `source_complete`；范围标记（如 `Ch 1-4`、`Ch18-19-20`）会记录 `covered_chapters`。独立 `---` 行按场景边界接入为 `separator` 段（target 固定为 `---`），长段落先按行、再按句切分，并记录 `source_start`/`source_end`。
 2. **术语表**：三层——全局表（`glossary/hp.json`，只收原著 HP 正典译名和性转马尔福统一规则）、系列主表（本系列所有书共用，可补系列特有词，覆盖正典须标 `override_global`）、书副本（全局 + 系列 + 本书本地补充）。书内新词先写副本，交付前用 `sync_glossary.py --merge-back` 回并系列主表，不回并全局表；翻译时只注入当前批实际出现的术语。
 3. **预扫描**：整本书源齐了再做；`prescan_book.py` 按章并行（默认 2），生成 digest、style brief、synopsis、book story bible，并合并进系列 bible。
 4. **翻译**：`translate_book_v2.py` 先做 AI 术语对齐（系列书默认；low effort；覆盖缺口先由模型提出 alias/新词/忽略/未决，确定性校验后写入系列主表并同步书副本，未决或仍有缺口则拒绝开始翻译），再按 token 预算打包，等长 JSON 数组，校验数量/完整/非空；协议失败重试 2 次，最后逐段回退，不静默丢段。
-5. **润色**：翻译入口默认接着润色，固定轻改；加载 `fiction-humanizer-zh` skill 的轻改模式，项目 `polish.md` 作为最高优先级覆盖；只改句子、节奏、对白和翻译腔，段落顺序不变，不新增原文没有的动作、感官细节或心理活动。
+5. **润色**：翻译入口默认接着润色，固定轻改；加载 `translation-polish-zh` skill 的轻改模式（只取对照原文润色的部分，不含翻译流程），项目 `polish.md` 作为最高优先级覆盖；只改句子、节奏、对白和翻译腔，段落顺序不变，不新增原文没有的动作、感官细节或心理活动。
 6. **审查**：`review_book_v2.py` 按全书连续块审查；结构化 JSON + JSON mode，非法输出递归二分到单段，单段有限重试，总调用有预算；原始失败响应落 `work_temp/review_traces/`；候选经证据核对，矛盾做冲突仲裁；只出建议，不改正文。审查注入 profile 规则，避免把 AU 改动“纠正”回原著。v2 审查同时承担忠实度（漏译/增译/误译/语义反转）和跨章一致性；证据核对会读取术语表，`terminology` 候选精确命中 `forbidden_targets` 时确定性确认，不再被证据层自我否决。
 7. **交付**：`book_delivery.py` 先自动把书内新词回并系列主表并同步全系列（不回并全局表；有冲突默认拒绝交付，`--allow-glossary-conflicts` 仅排障），再从段落状态渲染完整 `translation/<Title>.md`，用 `build_html.py` + `template.html` 生成单份 HTML；Markdown 超过 80,000 字符时，额外按章边界均匀切出 `translation/<Title> - Part N.md`。
 
@@ -75,6 +75,10 @@ works/<series-id>-<slug>/          # 一个系列一个根目录
 .venv/bin/python tools/translate_book_v2.py works/<series>/books/book-01 --effort low
 .venv/bin/python tools/translate_book_v2.py works/<series>/books/book-01 --max-seconds 3000
 
+# 3b. 重新润色已有译文（对照原文；先备份章节状态）
+.venv/bin/python tools/repolish_book_v2.py works/<series>/books/book-01 --effort low
+.venv/bin/python tools/repolish_book_v2.py works/<series>/books/book-01 --chapters 1 --dry-run
+
 # 4. 全书审查（issues 带 category/severity；风格建议单独列；--workers 省略时自动跑 preflight；改 prompt/effort/profile 后先 --limit-blocks 1 小样验证（写到 review/smoke））
 .venv/bin/python tools/review_book_v2.py works/<series>/books/book-01 --effort none
 .venv/bin/python tools/review_book_v2.py works/<series>/books/book-01 --effort none --limit-blocks 1
@@ -112,7 +116,7 @@ Pandoc 在项目 venv 里；`build_html.py` 需要 PATH 中包含 pypandoc 自�
 - 分卷只按章边界切；单章本身超过上限直接报错，不切章内。完整 Markdown 保留为母版，不计入分卷上限。
 - 跨学年作品按书拆成多个 work，每本书单独交付，不再用 v1 的分卷脚本。
 - 最终 HTML 必须走 `tools/build_html.py` 套 `template.html`，不能裸 Pandoc。
-- 交付前自动跑 `tools/verify_book.py`：完整性、禁用称谓、英文残留、术语变体、章标题；有 error 就拒绝交付，`--skip-verify` 仅供排障。
+- 交付前自动跑 `tools/verify_book.py`：完整性、禁用称谓、英文残留、术语变体、章标题、译文覆盖率；有 error 就拒绝交付，`--skip-verify` 仅供排障。译文覆盖率默认出 warning（目标过短、句子密度骤降、疑似漏掉场景尾段），`--strict-translation-coverage` 可将其升级为 error。
 - `translation/` 顶层只放最终文件；中间产物放 `translation/review/`、`work_temp/prescan/` 等。
 
 ## 开发进度

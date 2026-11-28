@@ -21,6 +21,7 @@ import align_glossary
 import book_state
 import profile_rules
 import segment_state
+import translation_coverage
 
 ENGLISH_RESIDUE = re.compile(r"[A-Za-z]{3,}")
 BARE_DRACO = re.compile(r"(?<!妮娅)德拉科(?!妮娅)")
@@ -61,12 +62,15 @@ def verify_book(
     *,
     strict_coverage: bool = False,
     min_coverage_count: int = 2,
+    strict_translation_coverage: bool = False,
 ) -> dict[str, Any]:
     """Run deterministic checks and return a machine-readable report.
 
     ``strict_coverage`` turns uncovered source proper nouns into errors. The
     default is false so legacy works and test fixtures without a glossary still
-    pass; delivery enables it for series books.
+    pass; delivery enables it for series books. ``strict_translation_coverage``
+    turns coverage suspects (short targets, fewer sentences, possible missing
+    scene tails) into errors; by default they are warnings.
     """
     book = Path(book_dir)
     chapters = _chapters(book)
@@ -153,12 +157,19 @@ def verify_book(
             {"kind": "glossary_coverage", **item} for item in coverage["missing"]
         )
 
+    translation = translation_coverage.coverage_report(book)
+    errors.extend(translation["errors"])
+    warnings.extend(translation["warnings"])
+    if strict_translation_coverage:
+        errors.extend(translation["warnings"])
+
     return {
         "book_dir": str(book),
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
         "coverage": coverage,
+        "translation_coverage": translation,
         "alignment": {
             "errors": alignment["errors"],
             "warnings": alignment["warnings"],
@@ -172,6 +183,8 @@ def verify_book(
             "variant_errors": len(alignment["errors"]),
             "canonical_missing": len(alignment["warnings"]),
             "coverage_missing": len(coverage["missing"]),
+            "translation_coverage_errors": len(translation["errors"]),
+            "translation_coverage_warnings": len(translation["warnings"]),
         },
     }
 
@@ -191,11 +204,17 @@ def main(argv: list[str] | None = None) -> None:
         default=3,
         help="minimum source occurrences for a coverage error (default: 3)",
     )
+    parser.add_argument(
+        "--strict-translation-coverage",
+        action="store_true",
+        help="treat short targets, fewer sentences and possible missing scene tails as errors",
+    )
     args = parser.parse_args(argv)
     report = verify_book(
         args.book_dir,
         strict_coverage=args.strict_coverage,
         min_coverage_count=args.coverage_min_count,
+        strict_translation_coverage=args.strict_translation_coverage,
     )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

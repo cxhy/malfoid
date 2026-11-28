@@ -3,14 +3,9 @@
 # private. Only tooling, docs and tests belong in the repository.
 # ---------------------------------------------------------------------------
 works/
-Green_and_Silver/
-The_girl_who_loved_the_boy_who_lived/
-How_I_Met_Your_Mother/
-Worst Enemy/
-The_Boy_Who_Loved_the/
+downloads/
 
 # Input books and generated documents (never commit)
-Harry Potter and the Sorcerer's Tsundere/
 *.pdf
 *.epub
 *.mobi
@@ -19,6 +14,8 @@ Harry Potter and the Sorcerer's Tsundere/
 *.zip
 
 # Local agent runtime and machine-specific settings
+/password
+/.agents/
 .pi/settings.json
 .pi/agent/
 .venv/

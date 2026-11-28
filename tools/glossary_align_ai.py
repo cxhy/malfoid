@@ -29,6 +29,7 @@ import segment_state
 from model_client import call_client
 
 BATCH_SIZE = 20
+DECISION_ATTEMPTS = 3
 DEFAULT_MAX_TOKENS = 8192
 CANDIDATE_CONTEXT_LIMIT = 3
 CANDIDATE_CHARS = 360
@@ -72,6 +73,21 @@ def _candidate_pattern(candidate: str) -> re.Pattern[str]:
     return re.compile(r"(?<![A-Za-z0-9])" + re.escape(candidate) + r"(?![A-Za-z0-9])", re.IGNORECASE)
 
 
+def _candidate_window(text: str, pattern: re.Pattern[str]) -> str:
+    """Return a short excerpt centred on the candidate match.
+
+    Contexts used to be the first ``CANDIDATE_CHARS`` of a paragraph, which
+    often cut off the name itself and left the model without evidence.
+    """
+    match = pattern.search(text)
+    if not match:
+        return text[:CANDIDATE_CHARS]
+    pad = max(0, (CANDIDATE_CHARS - (match.end() - match.start())) // 2)
+    start = max(0, match.start() - pad)
+    end = min(len(text), start + CANDIDATE_CHARS)
+    return text[start:end]
+
+
 def _contexts(book: Path, candidate: str) -> list[dict[str, Any]]:
     pattern = _candidate_pattern(candidate)
     found: list[dict[str, Any]] = []
@@ -85,7 +101,7 @@ def _contexts(book: Path, candidate: str) -> list[dict[str, Any]]:
                 {
                     "chapter": chapter.get("chapter"),
                     "index": segment.get("index"),
-                    "source": source[:CANDIDATE_CHARS],
+                    "source": _candidate_window(source, pattern),
                     "target": (segment.get("target") or "")[:CANDIDATE_CHARS],
                 }
             )
@@ -160,11 +176,24 @@ def _decisions(
     decisions: list[dict[str, Any]] = []
     for offset in range(0, len(candidates), BATCH_SIZE):
         batch = candidates[offset : offset + BATCH_SIZE]
-        data = _parse_json(call_client(client, _prompt(batch, terms, book)))
-        items = data.get("decisions")
-        if not isinstance(items, list):
-            raise GlossaryAlignmentError("model output must contain a decisions array")
-        decisions.extend(item for item in items if isinstance(item, dict))
+        pending = list(batch)
+        answered: dict[str, dict[str, Any]] = {}
+        for _attempt in range(DECISION_ATTEMPTS):
+            data = _parse_json(call_client(client, _prompt(pending, terms, book)))
+            items = data.get("decisions")
+            if not isinstance(items, list):
+                raise GlossaryAlignmentError("model output must contain a decisions array")
+            wanted = {candidate.casefold() for candidate in pending}
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                candidate = str(item.get("candidate") or "").strip().casefold()
+                if candidate in wanted and candidate not in answered:
+                    answered[candidate] = item
+            pending = [c for c in pending if c.casefold() not in answered]
+            if not pending:
+                break
+        decisions.extend(answered.values())
     return decisions
 
 
@@ -280,8 +309,25 @@ def _apply(
     data = json.loads(master_path.read_text(encoding="utf-8"))
     terms = list(data.get("terms") or [])
     by_id = {str(term.get("id") or ""): term for term in terms}
+    merged_by_id = {
+        str(term.get("id") or ""): term
+        for term in book_state.load_glossary_terms(book)
+    }
     for item in aliases:
-        term = by_id[item["term_id"]]
+        term = by_id.get(item["term_id"])
+        if term is None:
+            # Validation runs against the merged global + series + book view, so an
+            # alias may target a canonical global term or a book-local term that the
+            # series master does not repeat yet. Add a series copy so the alias
+            # survives synchronization.
+            base = merged_by_id.get(item["term_id"])
+            if base is None:
+                raise GlossaryAlignmentError(
+                    f"alias decision names unknown term id: {item['term_id']!r}"
+                )
+            term = dict(base)
+            terms.append(term)
+            by_id[item["term_id"]] = term
         names = list(term.get("aliases") or [])
         if item["candidate"] not in names and item["candidate"] != term.get("source"):
             names.append(item["candidate"])

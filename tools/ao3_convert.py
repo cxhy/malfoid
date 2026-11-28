@@ -9,7 +9,7 @@ Output layout (default root: ./works):
         source/chapters/ch-NN.md  one file per chapter (QA / term extraction)
 
 Usage:
-    .venv/bin/python tools/ao3_convert.py Green_and_Silver/Green_and_Silver_Book_I.html
+    .venv/bin/python tools/ao3_convert.py downloads/green-and-silver/source/ao3/Green_and_Silver_Book_I.html
     .venv/bin/python tools/ao3_convert.py <file.html> --force
 """
 
